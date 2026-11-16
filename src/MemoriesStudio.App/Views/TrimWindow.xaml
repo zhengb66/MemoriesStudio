@@ -1,0 +1,60 @@
+<Window x:Class="MemoriesStudio.Views.TrimWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ctrl="clr-namespace:MemoriesStudio.Controls"
+        xmlns:libvlc="clr-namespace:LibVLCSharp.WPF;assembly=LibVLCSharp.WPF"
+        Title="剪辑视频片段" Width="880" Height="660"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BgBrush}"
+        ShowInTaskbar="False">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 视频画面（LibVLC 渲染，自带声音） -->
+        <Border Grid.Row="0" Background="#000000" CornerRadius="5" ClipToBounds="True" Margin="0,0,0,8">
+            <libvlc:VideoView x:Name="Video"/>
+        </Border>
+
+        <!-- 控制区 -->
+        <Border Grid.Row="1" Background="{StaticResource PanelBrush}" CornerRadius="6"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="12,10">
+            <StackPanel>
+                <!-- 播放控制（与主窗口同一套图标按钮） -->
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <Button x:Name="BtnPlay" Style="{StaticResource IconBtn}" Click="OnTogglePlay" ToolTip="播放 / 暂停">
+                        <Path x:Name="PlayIcon" Data="{StaticResource IconPlayGeom}" Fill="{StaticResource TextBrush}"
+                              Width="13" Height="13" Stretch="UniformToFill"/>
+                    </Button>
+                    <Button x:Name="BtnStop" Style="{StaticResource IconBtn}" Margin="6,0,12,0" Click="OnStop" ToolTip="停止">
+                        <Path Data="{StaticResource IconStopGeom}" Fill="{StaticResource TextBrush}"
+                              Width="13" Height="13" Stretch="UniformToFill"/>
+                    </Button>
+                    <TextBlock x:Name="TxtTime" Text="00:00.0 / 00:00.0" VerticalAlignment="Center"
+                               FontFamily="Consolas, Microsoft YaHei UI" Foreground="{StaticResource TextDimBrush}"
+                               FontSize="12"/>
+                    <TextBlock x:Name="TxtHint" VerticalAlignment="Center" Margin="14,0,0,0" FontSize="11"
+                               Foreground="{StaticResource TextDimBrush}"
+                               Text="拖动左右把手选起止点，拖中间圆点定位；播放只在区间内循环"/>
+                </StackPanel>
+
+                <!-- 区间条：起点 / 终点 / 位置 三合一 -->
+                <ctrl:TrimRangeBar x:Name="Range" Height="30" VerticalAlignment="Center"
+                                   HorizontalAlignment="Stretch" Margin="0,0,0,2"/>
+
+                <Grid Margin="0,2,0,10">
+                    <TextBlock x:Name="TxtIn" Text="起点 0.0s" FontSize="11.5"
+                               Foreground="{StaticResource TextDimBrush}" HorizontalAlignment="Left"/>
+                    <TextBlock x:Name="TxtOut" Text="终点 0.0s" FontSize="11.5"
+                               Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Right"/>
+                </Grid>
+
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="取消" Width="84" Style="{StaticResource Btn}" Click="OnCancel"/>
+                    <Button Content="确定" Width="84" Margin="8,0,0,0" Style="{StaticResource AccentBtn}" Click="OnOk"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

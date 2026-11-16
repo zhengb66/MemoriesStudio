@@ -1,0 +1,23 @@
+# ---- .NET 构建产物 ----
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# ---- 发布与打包产物（体积大，不入库）----
+build/
+dist/
+installer/
+versions/
+src/MemoriesStudio.Setup/payload.zip
+
+# ---- 运行时/缓存 ----
+*.log
+*.tmp
+media_cache/
+
+# ---- 系统 ----
+Thumbs.db
+desktop.ini
+.DS_Store

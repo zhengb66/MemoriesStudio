@@ -1,0 +1,53 @@
+<Window x:Class="MemoriesStudio.Views.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="全局设置" Width="440" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize" ShowInTaskbar="False"
+        Background="{StaticResource BgBrush}">
+    <StackPanel Margin="18,16,18,16">
+        <TextBlock Text="输出设置" Style="{StaticResource SectionTitle}"/>
+
+        <Grid Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="72"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="分辨率" Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
+            <ComboBox x:Name="CmbRes" Grid.Column="1" Style="{StaticResource Combo}" DisplayMemberPath="Name"/>
+        </Grid>
+
+        <Grid Margin="0,0,0,14">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="72"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="帧率" Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
+            <ComboBox x:Name="CmbFps" Grid.Column="1" Style="{StaticResource Combo}"/>
+        </Grid>
+
+        <TextBlock Text="分辨率决定成片清晰度；4K 导出更慢、文件更大。帧率建议与素材一致（手机视频多为 30 或 60）。"
+                   TextWrapping="Wrap" Foreground="{StaticResource TextDimBrush}" FontSize="10.5" Margin="0,0,0,16"/>
+
+        <TextBlock Text="背景音乐" Style="{StaticResource SectionTitle}"/>
+        <ListBox x:Name="LstMusic" Height="110" Background="#1B1D24" BorderBrush="{StaticResource BorderBrush}"
+                 BorderThickness="1" FontSize="11" Foreground="#C9CDD6" Margin="0,0,0,8"
+                 ScrollViewer.HorizontalScrollBarVisibility="Auto"/>
+        <UniformGrid Columns="3" Margin="0,0,0,6">
+            <Button Content="添加音乐…" Style="{StaticResource Btn}" Margin="0,0,4,0" Click="OnAddMusic"/>
+            <Button Content="移除所选" Style="{StaticResource Btn}" Margin="4,0,4,0" Click="OnRemoveMusic"/>
+            <Button Content="上移" Style="{StaticResource Btn}" Margin="4,0,0,0" Click="OnMoveUpMusic"/>
+        </UniformGrid>
+        <TextBlock Text="导出时多曲按列表顺序循环铺满全片；只在显示照片的片段出声（视频段自动静音），每首进出各做淡入/淡出。预览不播配乐。"
+                   TextWrapping="Wrap" Foreground="{StaticResource TextDimBrush}" FontSize="10.5" Margin="0,0,0,16"/>
+
+        <Grid>
+            <Button Content="关于" Style="{StaticResource Btn}" Padding="16,6"
+                    HorizontalAlignment="Left" VerticalAlignment="Center"
+                    ToolTip="软件名称、版本号、作者与版权信息" Click="OnAbout"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="取消" Style="{StaticResource Btn}" Margin="0,0,8,0" Click="OnCancel" IsCancel="True"/>
+                <Button Content="确定" Style="{StaticResource AccentBtn}" Padding="20,6" Click="OnOk" IsDefault="True"/>
+            </StackPanel>
+        </Grid>
+    </StackPanel>
+</Window>
