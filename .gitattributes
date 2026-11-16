@@ -1,11 +1,11 @@
-* text=auto
-*.cs text eol=crlf
-*.xaml text eol=crlf
-*.csproj text eol=crlf
-*.sln text eol=crlf
-*.sh text eol=lf
-*.py text eol=lf
-*.md text eol=lf
+# 不做换行转换：按原始字节存库，避免 Windows 工作区与仓库内容出现无谓差异
+* -text
+
+# 二进制资源
 *.gray binary
 *.ico binary
 *.onnx binary
+*.dll binary
+*.exe binary
+*.png binary
+*.jpg binary
