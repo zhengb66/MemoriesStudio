@@ -2151,15 +2151,25 @@ public partial class MainWindow : Window
         return sv is null ? -1 : c.TranslatePoint(new Point(0, c.ActualHeight / 2), sv).Y;
     }
 
+    /// <summary>自检用：向时间轴控件发一个真实路由的按键（先 PreviewKeyDown 隧道，再 KeyDown 冒泡）。</summary>
     private void SendTestKey(Key key)
     {
         var source = PresentationSource.FromVisual(this);
         if (source is null) return;
+        Timeline.Focus();
+
         var args = new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, key)
+        {
+            RoutedEvent = Keyboard.PreviewKeyDownEvent
+        };
+        Timeline.RaiseEvent(args);
+        if (args.Handled) return;   // 与真实输入一致：隧道阶段被吃掉就不再走冒泡
+
+        var down = new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, key)
         {
             RoutedEvent = Keyboard.KeyDownEvent
         };
-        RaiseEvent(args);
+        Timeline.RaiseEvent(down);
     }
 
     /// <summary>自检访问器：时间轴控件。</summary>
@@ -2375,25 +2385,6 @@ public partial class MainWindow : Window
             if (AssetsList.IsKeyboardFocusWithin) DeleteSelectedAssets();
             else if (Timeline.SelectedClips.Count > 0) RemoveClips(Timeline.SelectedClips.ToList());
             else if (_selected is not null) RemoveClips(new[] { _selected });
-            e.Handled = true;
-        }
-        else if (!inText && Timeline.SelectedClips.Count > 0 && !AssetsList.IsKeyboardFocusWithin
-                 && e.Key is Key.Left or Key.Right or Key.Up or Key.Down or Key.Home or Key.End)
-        {
-            // 键盘导航：←/→ 相邻片段，↑/↓ 翻页（按视口可见片段数），Home/End 首尾。
-            // SelectClipAt 内部会滚入视口、跳播放头并触发 SelectionChanged（素材库与属性页同步）
-            var clips = Timeline.Project!.Clips;
-            var cur = Timeline.Selected is null ? 0 : Math.Max(0, clips.IndexOf(Timeline.Selected));
-            var target = e.Key switch
-            {
-                Key.Left => cur - 1,
-                Key.Right => cur + 1,
-                Key.Up => cur - Timeline.VisibleClipCount(),
-                Key.Down => cur + Timeline.VisibleClipCount(),
-                Key.Home => 0,
-                _ => clips.Count - 1,
-            };
-            Timeline.SelectClipAt(target);
             e.Handled = true;
         }
     }
