@@ -704,6 +704,84 @@ public partial class MainWindow : Window
         _selected = clip;
         RefreshInspector();
         RenderFrame();
+        if (clip is not null) RevealAssetInList(clip);
+    }
+
+    /// <summary>
+    /// 时间轴上选中片段后，把素材库中对应的那一项滚到列表中间并高亮，
+    /// 让用户在几百个素材里立刻对上"这个片段来自哪张图 / 哪段视频"。
+    /// </summary>
+    private void RevealAssetInList(Clip clip)
+    {
+        // 动图片段的 SourcePath 是缓存截帧，素材库里对应的是原视频（StillFrom）
+        var path = string.IsNullOrEmpty(clip.StillFrom) ? clip.SourcePath : clip.StillFrom;
+        var asset = _assets.FirstOrDefault(a => string.Equals(a.Path, path, StringComparison.OrdinalIgnoreCase))
+                    ?? _assets.FirstOrDefault(a => string.Equals(a.Path, clip.SourcePath, StringComparison.OrdinalIgnoreCase));
+        if (asset is null) return;
+
+        // 只做定位高亮，不抢键盘焦点（焦点仍在时间轴上，方向键继续可用）
+        if (!AssetsList.SelectedItems.Contains(asset)) AssetsList.SelectedItem = asset;
+        CenterListBoxItem(AssetsList, asset);
+    }
+
+    /// <summary>把列表项滚到可视区正中。</summary>
+    private static void CenterListBoxItem(ListBox list, object item)
+    {
+        list.ScrollIntoView(item);
+        list.UpdateLayout();
+
+        var sv = FindDescendant<ScrollViewer>(list);
+        if (sv is null) return;
+        var max = Math.Max(0, sv.ScrollableHeight);
+
+        // 虚拟化列表（CanContentScroll=true）的 Offset / ViewportHeight 单位是"项"，
+        // 不能拿像素坐标直接相加——按项索引居中。
+        if (sv.CanContentScroll)
+        {
+            var index = list.Items.IndexOf(item);
+            if (index < 0) return;
+            sv.ScrollToVerticalOffset(Math.Clamp(index - sv.ViewportHeight / 2 + 0.5, 0, max));
+            return;
+        }
+
+        if (list.ItemContainerGenerator.ContainerFromItem(item) is not ListBoxItem container) return;
+        if (sv.ViewportHeight <= 0) return;
+        var center = container.TranslatePoint(new Point(0, container.ActualHeight / 2), sv).Y;
+        sv.ScrollToVerticalOffset(Math.Clamp(sv.VerticalOffset + center - sv.ViewportHeight / 2, 0, max));
+    }
+
+    private static T? FindDescendant<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is T hit) return hit;
+            if (FindDescendant<T>(child) is { } nested) return nested;
+        }
+        return null;
+    }
+
+    /// <summary>光标键左右：横向滚动时间轴视口。</summary>
+    private void ScrollTimelineBy(double pixels)
+    {
+        TimelineScroll.UpdateLayout();   // 连续按键落在同一帧时先刷新 Offset，避免丢步
+        var max = Math.Max(0, TimelineScroll.ScrollableWidth);
+        TimelineScroll.ScrollToHorizontalOffset(
+            Math.Clamp(TimelineScroll.HorizontalOffset + pixels, 0, max));
+    }
+
+    /// <summary>光标键上下：逐行滚动素材库（只滚视口，不改选择）。</summary>
+    private void ScrollAssetsBy(int rows)
+    {
+        var sv = FindDescendant<ScrollViewer>(AssetsList);
+        if (sv is null) return;
+
+        sv.UpdateLayout();   // 同上：先让上一次滚动的 Offset 落地
+
+        // 虚拟化列表的 Offset 以项为单位，滚 1 项即一行；非虚拟化时按像素（一行约 62px）
+        var step = sv.CanContentScroll ? 1.0 : 62.0;
+        var max = Math.Max(0, sv.ScrollableHeight);
+        sv.ScrollToVerticalOffset(Math.Clamp(sv.VerticalOffset + rows * step, 0, max));
     }
 
     private void OnTimelineSeek(object? sender, double time) => PreviewSeek(time);
@@ -2031,6 +2109,67 @@ public partial class MainWindow : Window
     /// <summary>自检访问器：当前工程。</summary>
     public Models.ProjectFile? ProjectForTest => _project;
 
+    /// <summary>
+    /// 自检：选中时间轴第 index 个片段（1 起），验证素材库自动跟随定位的效果，
+    /// 返回素材在素材库视口中的纵向位置（应接近 viewport 的一半），并整窗截图。
+    /// </summary>
+    public string RevealForTest(int index1, string outPath)
+    {
+        if (_project.Clips.Count == 0) return "FAIL no-clips";
+        var i = Math.Clamp(index1 - 1, 0, _project.Clips.Count - 1);
+        var clip = _project.Clips[i];
+
+        // 与鼠标点击时间轴走同一套逻辑：选中 → 刷新属性/预览 → 素材库定位
+        Timeline.SetClipSelection(new[] { clip }, clip);
+        OnTimelineSelectionChanged(Timeline, clip);
+        UpdateLayout();
+
+        var path = string.IsNullOrEmpty(clip.StillFrom) ? clip.SourcePath : clip.StillFrom;
+        var asset = _assets.FirstOrDefault(a => string.Equals(a.Path, path, StringComparison.OrdinalIgnoreCase));
+        var sv = FindDescendant<ScrollViewer>(AssetsList);
+        var pos = "-";
+        if (asset is not null && sv is not null
+            && AssetsList.ItemContainerGenerator.ContainerFromItem(asset) is ListBoxItem c)
+        {
+            var y = c.TranslatePoint(new Point(0, c.ActualHeight / 2), sv).Y;
+            pos = $"{y:0.0}";
+        }
+
+        var w = (int)Math.Max(2, ActualWidth);
+        var h = (int)Math.Max(2, ActualHeight);
+        var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(this);
+        var enc = new PngBitmapEncoder();
+        enc.Frames.Add(BitmapFrame.Create(rtb));
+        using (var fs = File.Create(outPath)) enc.Save(fs);
+
+        // 模拟光标键：→ 右滚时间轴 ×3、↓ 下滚素材库 ×2，验证窗口级键盘路由生效
+        var h0 = TimelineScroll.HorizontalOffset;
+        var a0 = FindDescendant<ScrollViewer>(AssetsList)?.VerticalOffset ?? -1;
+        SendTestKey(Key.Right); SendTestKey(Key.Right); SendTestKey(Key.Right);
+        SendTestKey(Key.Down); SendTestKey(Key.Down);
+        UpdateLayout();
+        var h1 = TimelineScroll.HorizontalOffset;
+        var a1 = FindDescendant<ScrollViewer>(AssetsList)?.VerticalOffset ?? -1;
+
+        return $"OK index={i + 1} clip={clip.FileName} asset={asset?.FileName ?? "-"} " +
+               $"offset={sv?.VerticalOffset:0.0} viewport={sv?.ViewportHeight:0.0} " +
+               $"extent={sv?.ExtentHeight:0.0} listH={AssetsList.ActualHeight:0.0} " +
+               $"centerY={pos} selected={AssetsList.SelectedItems.Count} " +
+               $"keys tl {h0:0.0}->{h1:0.0} assets {a0:0.0}->{a1:0.0}";
+    }
+
+    private void SendTestKey(Key key)
+    {
+        var source = PresentationSource.FromVisual(this);
+        if (source is null) return;
+        var args = new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, key)
+        {
+            RoutedEvent = Keyboard.KeyDownEvent
+        };
+        RaiseEvent(args);
+    }
+
     /// <summary>自检访问器：时间轴控件。</summary>
     public Controls.TimelineControl TimelineForTest => Timeline;
 
@@ -2244,6 +2383,20 @@ public partial class MainWindow : Window
             if (AssetsList.IsKeyboardFocusWithin) DeleteSelectedAssets();
             else if (Timeline.SelectedClips.Count > 0) RemoveClips(Timeline.SelectedClips.ToList());
             else if (_selected is not null) RemoveClips(new[] { _selected });
+            e.Handled = true;
+        }
+        else if (!inText && Timeline.SelectedClips.Count > 0 && !AssetsList.IsKeyboardFocusWithin
+                 && e.Key is Key.Left or Key.Right or Key.Up or Key.Down)
+        {
+            // 时间轴上有选中片段时：左右滚动时间轴视口，上下逐行滚动素材库
+            var page = Math.Max(80, TimelineScroll.ViewportWidth * 0.12);
+            switch (e.Key)
+            {
+                case Key.Left: ScrollTimelineBy(-page); break;
+                case Key.Right: ScrollTimelineBy(+page); break;
+                case Key.Up: ScrollAssetsBy(-1); break;
+                case Key.Down: ScrollAssetsBy(+1); break;
+            }
             e.Handled = true;
         }
     }

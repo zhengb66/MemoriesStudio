@@ -145,6 +145,39 @@ public partial class App : Application
             return;
         }
 
+        // 素材库跟随定位自检：MemoriesStudio.exe --reveal-test <工程> <片段序号1起> <输出png>
+        // 选中时间轴指定片段，验证素材库对应素材被滚到视口正中，并落整窗截图
+        if (e.Args.Length >= 4 && e.Args[0] == "--reveal-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var rvWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = rvWindow;
+            rvWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    await rvWindow.OpenProjectForTest(e.Args[1]);
+                    await Task.Delay(600);        // 等首帧布局完成，避免用未成形的视口算滚动位置
+                    info = rvWindow.RevealForTest(
+                        int.Parse(e.Args[2], CultureInfo.InvariantCulture), e.Args[3]);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex.Message;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_reveal.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
         // 关于对话框自检：MemoriesStudio.exe --about-test <输出目录>
         // 离屏渲染「设置窗口（含左下角关于按钮）」与「关于对话框」两图，便于核对排版
         if (e.Args.Length >= 2 && e.Args[0] == "--about-test")
