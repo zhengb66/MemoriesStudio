@@ -115,7 +115,7 @@
             <!-- 属性面板 -->
             <Border Grid.Column="2" Background="{StaticResource PanelBrush}" CornerRadius="6"
                     BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Margin="10,0,0,0">
-                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12,10">
+                <ScrollViewer x:Name="InspectorScroll" VerticalScrollBarVisibility="Auto" Padding="12,10">
                     <StackPanel>
                         <!-- 选中片段 -->
                         <TextBlock Text="选中素材" Style="{StaticResource SectionTitle}"/>
@@ -126,6 +126,16 @@
                         <StackPanel x:Name="ClipPanel" Visibility="Collapsed">
                             <TextBlock x:Name="TxtClipName" Text="" FontSize="12.5" FontWeight="SemiBold"
                                        TextTrimming="CharacterEllipsis" Margin="0,0,0,10"/>
+
+                            <!-- 片段操作：紧跟"选中素材"，不混入取景等属性分组 -->
+                            <Grid Margin="0,0,0,6">
+                                <TextBlock Text="片段操作" Style="{StaticResource FieldLabel}"/>
+                            </Grid>
+                            <UniformGrid Columns="3" Margin="0,0,0,12">
+                                <Button x:Name="BtnClipUp" Content="前移" Style="{StaticResource Btn}" Margin="0,0,4,0" Click="OnClipUp"/>
+                                <Button x:Name="BtnClipDown" Content="后移" Style="{StaticResource Btn}" Margin="2,0,2,0" Click="OnClipDown"/>
+                                <Button x:Name="BtnClipRemove" Content="删除" Style="{StaticResource Btn}" Margin="4,0,0,0" Click="OnRemoveClip"/>
+                            </UniformGrid>
 
                             <!-- 照片：显示时长可调 -->
                             <StackPanel x:Name="DurPanel">
@@ -210,7 +220,7 @@
                                              TextChanged="OnCaptionTextChanged" Margin="0,0,0,8"/>
                                     <Grid Margin="0,0,0,2">
                                         <TextBlock Text="字号" Style="{StaticResource FieldLabel}"/>
-                                        <TextBlock x:Name="TxtCaptionFont" Text="4%" HorizontalAlignment="Right"
+                                        <TextBlock x:Name="TxtCaptionFont" Text="5%" HorizontalAlignment="Right"
                                                    Foreground="{StaticResource AccentBrush}" FontSize="11"/>
                                     </Grid>
                                     <Slider x:Name="SldCaptionFont" Style="{StaticResource FlatSlider}" Minimum="2" Maximum="12"
@@ -243,19 +253,31 @@
                                 </StackPanel>
                             </StackPanel>
 
-                            <Grid Margin="0,0,0,6">
-                                <TextBlock Text="取景" Style="{StaticResource FieldLabel}"/>
-                                <TextBlock x:Name="TxtFaceStatus" Text="" HorizontalAlignment="Right"
-                                           Foreground="{StaticResource TextDimBrush}" FontSize="10.5"/>
-                            </Grid>
-                            <TextBlock Text="取景中心由素材自动判定（有人对准人脸、无人对准主体），在预览画面上单击可手动调整。" TextWrapping="Wrap"
-                                       Foreground="{StaticResource TextDimBrush}" FontSize="10.5" Margin="0,0,0,12"/>
-
-                            <UniformGrid Columns="3" Margin="0,0,0,0">
-                                <Button x:Name="BtnClipUp" Content="前移" Style="{StaticResource Btn}" Margin="0,0,4,0" Click="OnClipUp"/>
-                                <Button x:Name="BtnClipDown" Content="后移" Style="{StaticResource Btn}" Margin="2,0,2,0" Click="OnClipDown"/>
-                                <Button x:Name="BtnClipRemove" Content="删除" Style="{StaticResource Btn}" Margin="4,0,0,0" Click="OnRemoveClip"/>
-                            </UniformGrid>
+                            <StackPanel x:Name="FacePanel">
+                                <Grid Margin="0,0,0,6">
+                                    <TextBlock Text="取景" Style="{StaticResource FieldLabel}"/>
+                                    <TextBlock x:Name="TxtFaceStatus" Text="" HorizontalAlignment="Right"
+                                               Foreground="{StaticResource TextDimBrush}" FontSize="10.5"/>
+                                </Grid>
+                                <Grid Margin="0,0,0,6">
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="主体类型" Style="{StaticResource FieldLabel}" Margin="0,0,8,0"/>
+                                        <RadioButton x:Name="RbSubjectPortrait" Content="人像" GroupName="ClipSubject"
+                                                     Checked="OnSubjectChanged" Foreground="{StaticResource TextBrush}"
+                                                     FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center"
+                                                     ToolTip="按人像取景：对准人脸并轻微推拉；识别错误时可在预览上单击校正中心"/>
+                                        <RadioButton x:Name="RbSubjectScenery" Content="景物" GroupName="ClipSubject"
+                                                     Checked="OnSubjectChanged" Foreground="{StaticResource TextBrush}"
+                                                     FontSize="11" VerticalAlignment="Center"
+                                                     ToolTip="按景物取景：不做人脸推拉（竖幅改为上下滑动）"/>
+                                    </StackPanel>
+                                    <Button x:Name="BtnRedetectFace" Content="重新检测人脸" Style="{StaticResource Btn}"
+                                            HorizontalAlignment="Right" Padding="6,1" FontSize="10.5"
+                                            Click="OnRedetectFace" ToolTip="重新识别这张照片的人脸并生成取景运镜"/>
+                                </Grid>
+                                <TextBlock Text="取景中心由素材自动判定（有人对准人脸、无人对准主体），在预览画面上单击可手动调整；识别错误可直接指定「人像 / 景物」。" TextWrapping="Wrap"
+                                           Foreground="{StaticResource TextDimBrush}" FontSize="10.5" Margin="0,0,0,10"/>
+                            </StackPanel>
                         </StackPanel>
 
                         <!-- 多选摘要 -->

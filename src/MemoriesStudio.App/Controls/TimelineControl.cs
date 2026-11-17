@@ -209,8 +209,14 @@ public sealed class TimelineControl : FrameworkElement
 
     /// <summary>
     /// 把选中移到第 index 个片段（0 起，越界自动钳到首尾）：
-    /// 更新选中、把片段滚入视口、播放头跳到片段起点并通知预览，
+    /// 更新选中、把片段滚入视口、播放头跳到片段尾帧并通知预览，
     /// 触发 SelectionChanged（属性面板与素材库随之同步）。无片段时返回 -1。
+    /// <para>
+    /// 播放头定位在"本片段独占区"的尾帧（后一片段起点 / 整条片尾的前一帧），而不是片段起点。
+    /// 因为带转场的片段其起点正处于与上一段的转场区间（local &lt; 转场时长），
+    /// 预览会按转场逻辑显示上一段素材；停到尾帧才能让预览显示当前选中的这段。
+    /// 用后一片段起点作右界，可保证 Locate 仍判定为本片段、不会落到下一段的转场区。
+    /// </para>
     /// </summary>
     public int SelectClipAt(int index)
     {
@@ -225,7 +231,13 @@ public sealed class TimelineControl : FrameworkElement
         EnsureClipOnScreen(index);
         InvalidateVisual();
 
-        Playhead = Math.Max(0, project.ComputeStarts()[index]);
+        var starts = project.ComputeStarts();
+        var start = starts[index];
+        // 右界取后一片段起点（含转场重叠时被让出的那一段），末片段则取整条片尾。
+        var end = index + 1 < project.Clips.Count ? starts[index + 1] : start + clip.Duration;
+        var fps = project.Fps > 0 ? project.Fps : 25.0;
+        var tail = Math.Max(start, end - 1.0 / fps);   // 独占区尾帧，至少不早于本片段起点
+        Playhead = Math.Clamp(tail, 0, project.TotalDuration);
         SeekRequested?.Invoke(this, Playhead);
         SelectionChanged?.Invoke(this, clip);
         return index;

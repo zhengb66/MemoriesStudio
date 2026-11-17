@@ -43,9 +43,11 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _faceScanCts;   // 批量人脸识别的取消令牌
 
     // 预览完全静音：配乐与视频原声都在导出时由 ffmpeg 一次性合成
-    private readonly VideoFramePlayer _video = new();
+    // 两路独立解码器/帧缓冲：转场时前一片段(ImgA)与后一片段(ImgB)必须同时有各自的帧，
+    // 共用一路会出现"两路显示同一帧 / 切换时定格"的随机感。
+    private readonly VideoFramePlayer[] _videos = { new(), new() };   // 0=ImgA, 1=ImgB
     private readonly VideoGrabber _grabber = new();   // 暂停/拖动进度时的单帧快速抓取
-    private WriteableBitmap? _videoBitmap;
+    private readonly WriteableBitmap?[] _videoBitmaps = new WriteableBitmap?[2];
 
     private Clip? _selected;
     private string? _projectPath;
@@ -57,8 +59,8 @@ public partial class MainWindow : Window
     private double _playAnchor;
     private readonly Stopwatch _clock = new();
 
-    private bool _videoNeedsSeek = true;
-    private double _videoOpenAt;
+    private readonly bool[] _videoNeedsSeek = { true, true };
+    private readonly double[] _videoOpenAt = new double[2];
     private bool _uiReady;      // InitializeComponent 期间控件会触发 ValueChanged，未就绪时忽略
 
     // 抓帧队列：仅保留最新请求，旧结果作废
@@ -230,6 +232,11 @@ public partial class MainWindow : Window
         // 手动导入：新图片后台批量体检（6 路并行完整解码），损坏的即时标红；缓存命中的秒过
         if (healthCheck)
             _ = CheckNewImagesHealthAsync();
+
+        // 导入后取消素材库选中：WPF 绑定集合时默认会把新加的第一项设为当前项并高亮，
+        // 用户往往只是想先把素材收进库、再逐个加入时间轴，残留高亮容易误操作（Del/加入选中）。
+        AssetsList.SelectedItems.Clear();
+        AssetsList.SelectedItem = null;
 
         SetStatus(audioCount > 0
             ? $"已导入 {added} 个素材（{audioCount} 个音乐文件未收：请用「设置 → 添加音乐」）· 双击加入时间轴，或直接拖到时间轴上插入"
@@ -459,6 +466,12 @@ public partial class MainWindow : Window
 
         if (count > 0)
         {
+            // 加入时间轴后取消素材库多选：这些条目已经入轨，再保持蓝色高亮没有意义，
+            // 也容易误触 Del /「加入选中」重复添加。SetClipSelection 不触发 SelectionChanged，
+            // 所以这里清空不会被 RevealAssetInList 立刻重新设回去。
+            AssetsList.SelectedItems.Clear();
+            AssetsList.SelectedItem = null;
+
             if (lastAdded is not null)
             {
                 _selected = lastAdded;
@@ -702,6 +715,68 @@ public partial class MainWindow : Window
         SetStatus($"已按素材自动取景（有人横向轻推 / 无人横向静止 / 竖幅上下滑动 / 人像居中），共 {images.Count} 张");
     }
 
+    /// <summary>属性页：对当前这张照片重新做一次人脸检测（单张，不弹进度窗）。</summary>
+    private async void OnRedetectFace(object sender, RoutedEventArgs e)
+    {
+        if (_selected is not { } clip || !clip.IsImage) return;
+        BtnRedetectFace.IsEnabled = false;
+        SetStatus($"正在重新检测人脸：{clip.FileName}…");
+        try
+        {
+            await DetectFaceAsync(clip);
+            SetStatus($"检测完成：{clip.FaceText} · 可在预览画面上单击微调取景中心");
+        }
+        catch (Exception ex)
+        {
+            SetStatus("人脸检测失败：" + ex.Message);
+        }
+        finally
+        {
+            BtnRedetectFace.IsEnabled = true;
+        }
+    }
+
+    /// <summary>
+    /// 属性页：强制把照片当人像 / 景物取景，应对自动识别错误。
+    /// 景物=清掉人脸数据走无人策略；人像=在缺人脸数据时给一个居中默认框，再让用户单击预览校正。
+    /// </summary>
+    private void OnSubjectChanged(object sender, RoutedEventArgs e)
+    {
+        if (_suppressUi || _selected is not { IsImage: true } clip) return;
+        var portrait = RbSubjectPortrait.IsChecked == true;
+
+        if (portrait)
+        {
+            // 优先恢复切景物前暂存的真实检测框；确实从未检测到时才造默认框。
+            if (!clip.RestoreFaceBox())
+            {
+                clip.FaceDetected = true;
+                clip.FaceX = 0.5;
+                clip.FaceY = 0.45;
+                clip.FaceSY = 0.5;
+                // 头高是"画布归一化"值：0.28 会让 MaxZoomFor=1/(0.28*3.6)≈0.99
+                // 被钳到 1.0，把横向人像的推拉完全压制 → 看起来像静止。0.14 不触发钳制。
+                clip.FaceH = 0.14;
+                clip.FaceHV = 2;
+            }
+        }
+        else
+        {
+            clip.BackupFaceBox();
+            clip.FaceDetected = false;
+            clip.FaceH = 0;
+        }
+
+        MotionPresets.Apply(clip, _project.Clips.IndexOf(clip), _project.Width, _project.Height);
+        MarkDirty();
+        Timeline.InvalidateVisual();
+        RefreshInspector();
+        RenderFrame();
+        SetStatus(portrait
+            ? "已按人像取景：对准人脸轻微推拉（可单击预览校正中心）"
+            : "已按景物取景：不做人脸推拉");
+    }
+
     // ==================================================================== 时间轴 / 属性
 
     private void OnTimelineSelectionChanged(object? sender, Clip? clip)
@@ -774,7 +849,7 @@ public partial class MainWindow : Window
         MarkDirty();
         Timeline.Refresh();
         RefreshAfterTimelineEdit();
-        _videoNeedsSeek = true;
+        InvalidateVideoSeek();
         RenderFrame();
 
         if (_selected is { } clip)
@@ -850,7 +925,13 @@ public partial class MainWindow : Window
                     .FirstOrDefault(x => x.Value == c.Transition);
                 SldTransition.Value = c.TransitionDuration;
                 TxtTransitionDur.Text = $"{c.TransitionDuration:0.0}s";
-                TxtFaceStatus.Text = c.FaceText;
+                FacePanel.Visibility = c.IsImage ? Visibility.Visible : Visibility.Collapsed;
+                var asPortrait = c.IsImage && c.FaceDetected && c.FaceH > 0.01;
+                RbSubjectPortrait.IsChecked = asPortrait;
+                RbSubjectScenery.IsChecked = c.IsImage && !asPortrait;
+                TxtFaceStatus.Text = c.IsImage
+                    ? (asPortrait ? "人像 · 已识别人脸" : "景物 · 按主体取景")
+                    : "";
 
                 RefreshCaptionPanel(c);
             }
@@ -929,9 +1010,14 @@ public partial class MainWindow : Window
         _suppressUi = true;
         try
         {
-            // 图片默认给一段全区间字幕（可直接打字使用）；视频从空开始
+            // 图片默认给一段字幕（可直接打字使用）：起点 1 秒、终点留 1 秒，正好错过片段首尾的转场区。
+            // 4 秒片段即 1~3 秒。短片段做钳制，保证至少留出 0.5 秒有效区间且不越过片段末尾。
             if (clip.IsImage && clip.Captions.Count == 0)
-                clip.Captions.Add(new Caption { Start = 0, End = clip.Duration });
+            {
+                var defaultStart = Math.Min(1.0, Math.Max(0, clip.Duration - 0.5));
+                var defaultEnd = Math.Min(clip.Duration, Math.Max(defaultStart + 0.5, clip.Duration - 1.0));
+                clip.Captions.Add(new Caption { Start = defaultStart, End = defaultEnd });
+            }
 
             var caps = clip.Captions;
             CaptionPanel.Visibility = Visibility.Visible;
@@ -1009,14 +1095,23 @@ public partial class MainWindow : Window
     private void OnCaptionAdd(object sender, RoutedEventArgs e)
     {
         if (_selected is not { } clip) return;
-        var local = Math.Clamp(_time - _project.Clips.TakeWhile(c => c != clip).Sum(c => c.Duration), 0, clip.Duration);
+        // 片段起点必须按成片时间轴计算（含转场重叠），否则有转场时起始时间会整体偏移。
+        var starts = _project.ComputeStarts();
+        var idx = _project.Clips.IndexOf(clip);
+        var clipStart = idx >= 0 && idx < starts.Length ? starts[idx] : 0;
+        var local = Math.Clamp(_time - clipStart, 0, clip.Duration);
         var cap = new Caption
         {
-            Start = Math.Min(local, Math.Max(0, clip.Duration - 1.0)),
-            End = Math.Min(local + 2.0, clip.Duration),
+            // 开始时间 = 当前播放头在本素材内的位置；末尾空间不足时整体前移，保证区间有效。
+            Start = local,
+            End = Math.Min(local + 3.0, clip.Duration),
             Text = ""
         };
-        if (cap.End <= cap.Start) { cap.Start = 0; cap.End = Math.Min(2.0, clip.Duration); }
+        if (cap.End - cap.Start < 0.2)
+        {
+            cap.Start = Math.Max(0, clip.Duration - 0.5);
+            cap.End = clip.Duration;
+        }
         clip.Captions.Add(cap);
         _suppressUi = true;
         LstCaptions.ItemsSource = null;
@@ -1046,8 +1141,17 @@ public partial class MainWindow : Window
     private void OnCaptionSelected(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressUi) return;
-        if (_selected is { } clip)
-            SetEditingCaption(LstCaptions.SelectedItem as Caption, clip);
+        if (_selected is not { } clip) return;
+
+        var cap = LstCaptions.SelectedItem as Caption;
+        SetEditingCaption(cap, clip);
+        if (cap is null) return;
+
+        // 选中字幕列表项时，播放头跳到该字幕在时间轴标记区间的中心（含转场重叠的真实起点）。
+        var starts = _project.ComputeStarts();
+        var idx = _project.Clips.IndexOf(clip);
+        var clipStart = idx >= 0 && idx < starts.Length ? starts[idx] : 0;
+        PreviewSeek(clipStart + (cap.Start + cap.End) / 2.0);
     }
 
     private void OnCaptionTextChanged(object sender, TextChangedEventArgs e)
@@ -1173,7 +1277,7 @@ public partial class MainWindow : Window
         MarkDirty();
         Timeline.Refresh();
         RefreshAfterTimelineEdit();
-        _videoNeedsSeek = true;
+        InvalidateVideoSeek();
         RenderFrame();
         SetStatus($"已调整节选区间：{clip.SourceIn:0.0}s ~ {clip.SourceIn + clip.Duration:0.0}s（共 {clip.Duration:0.0}s）");
     }
@@ -1313,14 +1417,21 @@ public partial class MainWindow : Window
         if (inTransition)
         {
             var prev = clips[idx - 1];
-            FillLayer(ImgA, prev, prev.Duration - td + local, false);
+            FillLayer(ImgA, prev, prev.Duration - td + local);
             HostB.Visibility = Visibility.Visible;
-            FillLayer(ImgB, cur, local, true);
+            FillLayer(ImgB, cur, local);
             ApplyTransition(cur.Transition, Math.Clamp(local / td, 0, 1));
         }
         else
         {
-            FillLayer(ImgA, cur, local, true);
+            // 转场结束时 ImgB 那一路已经在解码当前素材了：直接交换两路解码器/帧缓冲，
+            // 不必再为 ImgA 重开 ffmpeg（重开要等首帧，会看到半秒定格）。
+            if (_videos[1].FrameWidth > 0 &&
+                string.Equals(_videos[1].CurrentPath, cur.SourcePath, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(_videos[0].CurrentPath, cur.SourcePath, StringComparison.OrdinalIgnoreCase))
+                SwapVideoLayers();
+
+            FillLayer(ImgA, cur, local);
             HostB.Visibility = Visibility.Collapsed;
         }
 
@@ -1354,7 +1465,7 @@ public partial class MainWindow : Window
         HostB.ClipToBounds = true;
     }
 
-    private void FillLayer(Image img, Clip clip, double local, bool primary)
+    private void FillLayer(Image img, Clip clip, double local)
     {
         if (clip.Kind == MediaKind.Image)
         {
@@ -1364,7 +1475,10 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (primary) EnsureVideo(clip, local);
+        // 每层一路解码器 + 一路帧缓冲：转场时 ImgA/ImgB 各解码各的素材，互不覆盖
+        var li = ReferenceEquals(img, ImgB) ? 1 : 0;
+        var player = _videos[li];
+        EnsureVideo(li, clip, local);
 
         byte[]? data;
         int fw, fh;
@@ -1381,20 +1495,22 @@ public partial class MainWindow : Window
         }
         else
         {
-            data = _video.GetFrame(clip.SourceIn + local);
-            fw = _video.FrameWidth;
-            fh = _video.FrameHeight;
+            data = player.GetFrame(clip.SourceIn + local);
+            fw = player.FrameWidth;
+            fh = player.FrameHeight;
         }
 
-        if (data is not null && fw > 0)
+        var frameBmp = _videoBitmaps[li];
+        if (data is not null && fw > 0 && fh > 0)
         {
-            EnsureVideoBitmap(fw, fh);
-            _videoBitmap!.WritePixels(new Int32Rect(0, 0, fw, fh), data, fw * 4, 0);
-            img.Source = _videoBitmap;
+            EnsureVideoBitmap(li, fw, fh);
+            frameBmp = _videoBitmaps[li]!;
+            frameBmp.WritePixels(new Int32Rect(0, 0, fw, fh), data, fw * 4, 0);
+            img.Source = frameBmp;
         }
-        else if (_videoBitmap is not null)
+        else if (frameBmp is not null)
         {
-            img.Source = _videoBitmap;
+            img.Source = frameBmp;   // 新片段首帧未到时保留本层上一帧，不用上一路别处的帧
         }
         ResetImageLayout(img);
         img.RenderTransform = Transform.Identity;
@@ -1647,25 +1763,51 @@ public partial class MainWindow : Window
         }
     }
 
-    private void EnsureVideoBitmap(int w, int h)
+    private void EnsureVideoBitmap(int layer, int w, int h)
     {
-        if (_videoBitmap is not null && _videoBitmap.PixelWidth == w && _videoBitmap.PixelHeight == h) return;
-        _videoBitmap = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
+        var bmp = _videoBitmaps[layer];
+        if (bmp is not null && bmp.PixelWidth == w && bmp.PixelHeight == h) return;
+        _videoBitmaps[layer] = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
     }
 
-    private void EnsureVideo(Clip clip, double local)
+    private void EnsureVideo(int layer, Clip clip, double local)
     {
         if (_scrubPreview) return;   // 暂停状态下走快速抓帧，不启动流式解码
+        var player = _videos[layer];
         var target = clip.SourceIn + local;
-        var reopen = _videoNeedsSeek
-                     || _video.CurrentPath != clip.SourcePath
-                     || (!_playing && Math.Abs(target - _videoOpenAt) > 0.12);
+        var reopen = _videoNeedsSeek[layer]
+                     || !string.Equals(player.CurrentPath, clip.SourcePath, StringComparison.OrdinalIgnoreCase)
+                     || (!_playing && Math.Abs(target - _videoOpenAt[layer]) > 0.12);
 
         if (!reopen) return;
 
-        _video.Open(clip.SourcePath, target, _project.Fps);
-        _videoOpenAt = target;
-        _videoNeedsSeek = false;
+        player.Open(clip.SourcePath, target, _project.Fps);
+        _videoOpenAt[layer] = target;
+        _videoNeedsSeek[layer] = false;
+    }
+
+    /// <summary>转场结束后交换两路解码器与帧缓冲，让已解码的进入片段直接成为主画面。</summary>
+    private void SwapVideoLayers()
+    {
+        (_videos[0], _videos[1]) = (_videos[1], _videos[0]);
+        (_videoBitmaps[0], _videoBitmaps[1]) = (_videoBitmaps[1], _videoBitmaps[0]);
+        (_videoNeedsSeek[0], _videoNeedsSeek[1]) = (_videoNeedsSeek[1], _videoNeedsSeek[0]);
+        (_videoOpenAt[0], _videoOpenAt[1]) = (_videoOpenAt[1], _videoOpenAt[0]);
+        if (_videoBitmaps[0] is { } a) ImgA.Source = a;
+        if (_videoBitmaps[1] is { } b) ImgB.Source = b;
+    }
+
+    /// <summary>播放头跳转后两路解码器都要重新定位。</summary>
+    private void InvalidateVideoSeek()
+    {
+        _videoNeedsSeek[0] = true;
+        _videoNeedsSeek[1] = true;
+    }
+
+    private void CloseVideos()
+    {
+        _videos[0].Close();
+        _videos[1].Close();
     }
 
     // ==================================================================== 播放
@@ -1691,7 +1833,7 @@ public partial class MainWindow : Window
         _scrubPreview = false;   // 播放切换回流式解码
         _playAnchor = _time;
         _clock.Restart();
-        _videoNeedsSeek = true;
+        InvalidateVideoSeek();
         SetPlayIcon(true);
         SetStatus("正在预览（预览不播放声音，声音在导出时合成）");
     }
@@ -1702,7 +1844,7 @@ public partial class MainWindow : Window
         _scrubPreview = true;
         _clock.Stop();
         SetPlayIcon(false);
-        _videoNeedsSeek = true;
+        InvalidateVideoSeek();
         RenderFrame();
     }
 
@@ -1712,7 +1854,7 @@ public partial class MainWindow : Window
         _scrubPreview = true;
         _clock.Stop();
         SetPlayIcon(false);
-        _videoNeedsSeek = true;
+        InvalidateVideoSeek();
         PreviewSeek(0);
         SetStatus("已回到开头");
     }
@@ -1753,7 +1895,7 @@ public partial class MainWindow : Window
         }
 
         _time = Math.Clamp(time, 0, Math.Max(0, _project.TotalDuration));
-        _videoNeedsSeek = true;   // 之后按播放时从新位置起播
+        InvalidateVideoSeek();   // 之后按播放时从新位置起播
 
         var (idx, local) = _project.Locate(_time);
         if (idx < 0)
@@ -1807,7 +1949,7 @@ public partial class MainWindow : Window
     private void SeekTo(double time)
     {
         _time = Math.Clamp(time, 0, Math.Max(0, _project.TotalDuration));
-        _videoNeedsSeek = true;
+        InvalidateVideoSeek();
 
         if (_playing)
         {
@@ -2007,7 +2149,7 @@ public partial class MainWindow : Window
         _time = 0;
         _previewCache.Clear();
         _previewLoading.Clear();
-        _video.Close();
+        CloseVideos();
         ApplyProjectToUi();
         RenderFrame();
         MarkClean();
@@ -2056,7 +2198,7 @@ public partial class MainWindow : Window
         _time = 0;
         _previewCache.Clear();
         _previewLoading.Clear();
-        _video.Close();
+        CloseVideos();
         ApplyProjectToUi();
         RenderFrame();
         MarkClean();
@@ -2251,6 +2393,69 @@ public partial class MainWindow : Window
 
     /// <summary>自检访问器：素材库列表（核对导入后的类型/路径）。</summary>
     public IReadOnlyList<MediaAsset> AssetsForTest => _assets.ToList();
+
+    /// <summary>自检：导入素材后素材库应无选中项，并整窗截图（核对属性页分组顺序）。</summary>
+    public async Task<string> ImportSelectionForTest(string path, string outPath)
+    {
+        await ImportFilesAsync(new[] { path });
+        await Task.Delay(400);
+        var count = AssetsList.SelectedItems.Count;
+        var selectedItemNull = AssetsList.SelectedItem is null;
+
+        // 选中首个片段（不滚动属性面板），让截图展示顶部分组顺序
+        if (_project.Clips.Count == 0 && _assets.Count > 0)
+            await AddAssetsToTimelineAsync(_assets.ToList());
+        if (_project.Clips.Count > 0)
+        {
+            var c = _project.Clips[0];
+            Timeline.SetClipSelection(new[] { c }, c);
+            OnTimelineSelectionChanged(Timeline, c);
+            RefreshInspector();
+            InspectorScroll.ScrollToTop();
+        }
+        UpdateLayout();
+
+        var w = (int)Math.Max(2, ActualWidth);
+        var h = (int)Math.Max(2, ActualHeight);
+        var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(this);
+        var enc = new PngBitmapEncoder();
+        enc.Frames.Add(BitmapFrame.Create(rtb));
+        using (var fs = File.Create(outPath)) enc.Save(fs);
+
+        return $"{(count == 0 && selectedItemNull ? "OK" : "FAIL")} " +
+               $"assets={_assets.Count} selectedCount={count} selectedItemNull={selectedItemNull} " +
+               $"clipOpsY={BtnClipUp.TranslatePoint(new Point(0, 0), this).Y:0} " +
+               $"faceY={FacePanel.TranslatePoint(new Point(0, 0), this).Y:0}";
+    }
+    /// <summary>自检：素材库多选加入时间轴后，选中状态应被清空。</summary>
+    public async Task<string> AddSelectionForTest(string projectPath, string outPath)
+    {
+        await OpenProjectForTest(projectPath);
+        await Task.Delay(400);
+
+        var picks = _assets.Where(a => a.Kind != MediaKind.Audio && !a.Corrupt).Take(2).ToList();
+        foreach (var a in picks) AssetsList.SelectedItems.Add(a);
+        AssetsList.UpdateLayout();
+        var before = AssetsList.SelectedItems.Count;
+
+        await AddAssetsToTimelineAsync(picks);
+        await Task.Delay(200);
+        var after = AssetsList.SelectedItems.Count;
+        var nullItem = AssetsList.SelectedItem is null;
+
+        var w = (int)Math.Max(2, ActualWidth);
+        var h = (int)Math.Max(2, ActualHeight);
+        var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(this);
+        var enc = new PngBitmapEncoder();
+        enc.Frames.Add(BitmapFrame.Create(rtb));
+        using (var fs = File.Create(outPath)) enc.Save(fs);
+
+        var ok = before >= 2 && after == 0 && nullItem;
+        return $"{(ok ? "OK" : "FAIL")} before={before} after={after} null={nullItem} clips={_project.Clips.Count}";
+    }
+
     public System.Collections.ObjectModel.ObservableCollection<Clip> Clips => _project.Clips;
     public double TotalDuration => _project.TotalDuration;
 
@@ -2307,7 +2512,7 @@ public partial class MainWindow : Window
         _time = 0;
         _previewCache.Clear();
         _previewLoading.Clear();
-        _video.Close();
+        CloseVideos();
         ApplyProjectToUi();
         RenderFrame();
 
@@ -2390,6 +2595,241 @@ public partial class MainWindow : Window
                string.Join(" ", nav);
     }
 
+    /// <summary>
+    /// 自检：方向键选中带转场的片段后，播放头应停在本片段独占区尾帧，
+    /// Locate 仍判定为本片段且预览不处于转场区（不会显示上一段）。
+    /// </summary>
+    public string NavTailForTest(int targetNo, string outPath)
+    {
+        if (_project.Clips.Count < 2) return "FAIL need>=2 clips";
+        var tgt = Math.Clamp(targetNo - 1, 1, _project.Clips.Count - 1);  // 目标需有前驱（才能带转场）
+        var starts = _project.ComputeStarts();
+        var clip = _project.Clips[tgt];
+
+        // 先选中前一段，再用真实键盘路由按 → 导航到目标
+        var prev = _project.Clips[tgt - 1];
+        Timeline.SetClipSelection(new[] { prev }, prev);
+        OnTimelineSelectionChanged(Timeline, prev);
+        Timeline.Focus();
+        SendTestKey(Key.Right);
+
+        var end = tgt + 1 < _project.Clips.Count ? starts[tgt + 1] : starts[tgt] + clip.Duration;
+        var fps = _project.Fps > 0 ? _project.Fps : 25.0;
+        var expect = Math.Max(0, end - 1.0 / fps);
+        var (locIdx, locLocal) = _project.Locate(_time);
+        var td = clip.EffectiveTransition(prev);
+        var inTransition = td > 0.001 && locLocal < td - 1e-6;
+        var badge = TxtPreviewBadge.Text;
+        var selectedOk = ReferenceEquals(Timeline.Selected, clip);
+        var ok = selectedOk && locIdx == tgt && !inTransition && Math.Abs(_time - expect) < 0.02;
+
+        // 泵一会儿消息，等解码首帧渲染到预览（截图才有画面，而非刚 seek 后的黑屏）
+        var frame = new System.Windows.Threading.DispatcherFrame();
+        var pumpTimer = new System.Windows.Threading.DispatcherTimer(
+            TimeSpan.FromMilliseconds(1000), System.Windows.Threading.DispatcherPriority.Send,
+            (_, _) => frame.Continue = false, Dispatcher);
+        pumpTimer.Start();
+        System.Windows.Threading.Dispatcher.PushFrame(frame);
+        pumpTimer.Stop();
+
+        var w = (int)Math.Max(2, ActualWidth);
+        var h = (int)Math.Max(2, ActualHeight);
+        var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(this);
+        var enc = new PngBitmapEncoder();
+        enc.Frames.Add(BitmapFrame.Create(rtb));
+        using (var fs = File.Create(outPath)) enc.Save(fs);
+
+        return $"{(ok ? "OK" : "FAIL")} target={tgt + 1} selected={selectedOk} " +
+               $"expect={expect:0.000} time={_time:0.000} locIdx={locIdx + 1} " +
+               $"local={locLocal:0.000} td={td:0.000} inTransition={inTransition} badge={badge}";
+    }
+
+    /// <summary>
+    /// 自检：在指定片段的指定局部时间新建两段字幕，验证默认字号 5%、起始时间=播放头在片内位置、
+    /// 选择字幕列表项后播放头跳到区间中心；返回实测数值并整窗截图。
+    /// </summary>
+    public string CaptionForTest(int clipNo, double localAt, string outPath)
+    {
+        if (_project.Clips.Count == 0) return "FAIL no-clips";
+        var i = Math.Clamp(clipNo - 1, 0, _project.Clips.Count - 1);
+        var clip = _project.Clips[i];
+        clip.Captions.Clear();
+
+        Timeline.SetClipSelection(new[] { clip }, clip);
+        OnTimelineSelectionChanged(Timeline, clip);
+
+        var starts = _project.ComputeStarts();
+        PreviewSeek(starts[i] + localAt);
+        OnCaptionAdd(this, new RoutedEventArgs());
+        var cap1 = clip.Captions.LastOrDefault();
+        if (cap1 is null) return "FAIL no-caption";
+
+        var local2 = Math.Min(localAt + 2.5, Math.Max(0, clip.Duration - 1.0));
+        PreviewSeek(starts[i] + local2);
+        OnCaptionAdd(this, new RoutedEventArgs());
+        var cap2 = clip.Captions.LastOrDefault();
+        if (cap2 is null || ReferenceEquals(cap1, cap2)) return "FAIL no-caption2";
+
+        // 走真实列表选择路由：先清空再选中第二段，确保 SelectionChanged 触发
+        LstCaptions.SelectedItem = null;
+        LstCaptions.SelectedItem = cap2;
+        UpdateLayout();
+
+        var expectCenter = starts[i] + (cap2.Start + cap2.End) / 2.0;
+        var okFont = Math.Abs(cap1.FontSizePct - 5.0) < 0.01;
+        var okStart1 = Math.Abs(cap1.Start - localAt) < 0.01;
+        var okStart2 = Math.Abs(cap2.Start - local2) < 0.01;
+        var okCenter = Math.Abs(_time - expectCenter) < 0.02;
+
+        var w = (int)Math.Max(2, ActualWidth);
+        var h = (int)Math.Max(2, ActualHeight);
+        var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(this);
+        var enc = new PngBitmapEncoder();
+        enc.Frames.Add(BitmapFrame.Create(rtb));
+        using (var fs = File.Create(outPath)) enc.Save(fs);
+
+        return $"{(okFont && okStart1 && okStart2 && okCenter ? "OK" : "FAIL")} " +
+               $"font={cap1.FontSizePct:0.0} start1={cap1.Start:0.00}/{localAt:0.00} " +
+               $"start2={cap2.Start:0.00}/{local2:0.00} " +
+               $"center={_time:0.00}/{expectCenter:0.00} clipStart={starts[i]:0.00}";
+    }
+
+    /// <summary>
+    /// 自检：验证图片片段的默认字幕从 1 秒开始、片尾留 1 秒（正好错过首尾转场区）。
+    /// 清空指定图片片段的字幕后重新走属性面板刷新，读取生成的默认字幕并整窗截图。
+    /// </summary>
+    public string ImageCaptionDefaultForTest(int clipNo, string outPath)
+    {
+        if (_project.Clips.Count == 0) return "FAIL no-clips";
+        var i = Math.Clamp(clipNo - 1, 0, _project.Clips.Count - 1);
+        var clip = _project.Clips[i];
+        if (!clip.IsImage) return $"FAIL not-image kind={clip.Kind}";
+
+        clip.Captions.Clear();
+        Timeline.SetClipSelection(new[] { clip }, clip);
+        OnTimelineSelectionChanged(Timeline, clip);
+        RefreshCaptionPanel(clip);
+        UpdateLayout();
+
+        var cap = clip.Captions.FirstOrDefault();
+        if (cap is null) return "FAIL no-default-caption";
+
+        var expectStart = Math.Min(1.0, Math.Max(0, clip.Duration - 0.5));
+        var expectEnd = Math.Min(clip.Duration, Math.Max(expectStart + 0.5, clip.Duration - 1.0));
+        var ok = Math.Abs(cap.Start - expectStart) < 0.01 && Math.Abs(cap.End - expectEnd) < 0.01;
+
+        var w = (int)Math.Max(2, ActualWidth);
+        var h = (int)Math.Max(2, ActualHeight);
+        var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(this);
+        var enc = new PngBitmapEncoder();
+        enc.Frames.Add(BitmapFrame.Create(rtb));
+        using (var fs = File.Create(outPath)) enc.Save(fs);
+
+        return $"{(ok ? "OK" : "FAIL")} kind={clip.Kind} duration={clip.Duration:0.00} " +
+               $"start={cap.Start:0.00}/{expectStart:0.00} end={cap.End:0.00}/{expectEnd:0.00}";
+    }
+
+    /// <summary>
+    /// 自检：选中图片片段，切换「景物 / 人像」单选，验证取景数据被正确改写并整窗截图。
+    /// 重新检测按钮的识别逻辑 DetectFaceAsync 已有独立自检，这里只核对按钮在场且可用。
+    /// </summary>
+    public string FaceUiForTest(int index1, string outPath)
+    {
+        if (_project.Clips.Count == 0) return "FAIL no-clips";
+        var i = Math.Clamp(index1 - 1, 0, _project.Clips.Count - 1);
+        var clip = _project.Clips[i];
+        Timeline.SetClipSelection(new[] { clip }, clip);
+        OnTimelineSelectionChanged(Timeline, clip);
+
+        var buttonVisible = BtnRedetectFace.IsVisible && BtnRedetectFace.IsEnabled;
+        RbSubjectScenery.IsChecked = true;
+        var sceneryOk = !clip.FaceDetected && clip.FaceH <= 0.01 && RbSubjectPortrait.IsChecked != true;
+        RbSubjectPortrait.IsChecked = true;
+        var portraitOk = clip.FaceDetected && clip.FaceH > 0.01 && RbSubjectPortrait.IsChecked == true;
+        UpdateLayout();
+        InspectorScroll.ScrollToBottom();   // 让独立分类的「片段操作」也进入截图
+        UpdateLayout();
+
+        var w = (int)Math.Max(2, ActualWidth);
+        var h = (int)Math.Max(2, ActualHeight);
+        var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(this);
+        var enc = new PngBitmapEncoder();
+        enc.Frames.Add(BitmapFrame.Create(rtb));
+        using (var fs = File.Create(outPath)) enc.Save(fs);
+
+        return $"{(buttonVisible && sceneryOk && portraitOk ? "OK" : "FAIL")} " +
+               $"button={buttonVisible} scenery={sceneryOk} portrait={portraitOk} " +
+               $"rbP={RbSubjectPortrait.IsChecked} rbS={RbSubjectScenery.IsChecked} " +
+               $"faceH={clip.FaceH:0.00} mode={clip.FaceText}";
+    }
+
+    /// <summary>
+    /// 诊断自检：用指定照片走「自动检测 → 景物 → 人像」真实切换，
+    /// 打印每一步的人脸框与运镜字段，定位切回人像后"静止"的原因。
+    /// </summary>
+    public async Task<string> SubjectToggleForTest(string imagePath, string outPath)
+    {
+        await ImportFilesAsync(new[] { imagePath });
+        await Task.Delay(400);
+        await AddAssetsToTimelineAsync(_assets.ToList());
+        await Task.Delay(500);
+        if (_project.Clips.Count == 0) return "FAIL no-clips";
+        var clip = _project.Clips[0];
+        Timeline.SetClipSelection(new[] { clip }, clip);
+        OnTimelineSelectionChanged(Timeline, clip);
+
+        string Snap(string tag) => $"{tag}[det={clip.FaceDetected} faceH={clip.FaceH:0.000} " +
+            $"faceX={clip.FaceX:0.000} faceY={clip.FaceY:0.000} faceSY={clip.FaceSY:0.000} " +
+            $"panV={clip.PanV} z0={clip.StartZoom:0.000} z1={clip.EndZoom:0.000} " +
+            $"fy0={clip.StartFocusY:0.000} fy1={clip.EndFocusY:0.000} dur={clip.Duration:0.00}]";
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append(Snap("INIT "));
+
+        // 确保先处于人像，再切景物、再切回人像（都通过真实 Checked 事件）
+        RbSubjectScenery.IsChecked = false;
+        RbSubjectPortrait.IsChecked = true;
+        sb.Append(Snap("P1   "));
+        RbSubjectScenery.IsChecked = true;
+        sb.Append(Snap("S    "));
+        RbSubjectPortrait.IsChecked = true;
+        sb.Append(Snap("P2   "));
+
+        UpdateLayout();
+        var w = (int)Math.Max(2, ActualWidth);
+        var h = (int)Math.Max(2, ActualHeight);
+
+        void Shot(string path)
+        {
+            var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+            rtb.Render(this);
+            var enc = new PngBitmapEncoder();
+            enc.Frames.Add(BitmapFrame.Create(rtb));
+            using (var fs = File.Create(path)) enc.Save(fs);
+        }
+
+        // 切回人像后：播放头放到片段头 / 尾，直接读预览控件的 RenderTransform（不靠截图时机）
+        var headT = _project.ComputeStarts()[0] + clip.Duration * 0.05;
+        var tailT = _project.ComputeStarts()[0] + clip.Duration * 0.95;
+        _time = headT; RenderFrame(); UpdateLayout();
+        var headTransform = ImgA.RenderTransform?.ToString() ?? "null";
+        var headState = MotionMath.At(clip, 0.05);
+        Shot(outPath);
+        _time = tailT; RenderFrame(); UpdateLayout();
+        var tailTransform = ImgA.RenderTransform?.ToString() ?? "null";
+        var tailState = MotionMath.At(clip, 0.95);
+        Shot(outPath + ".tail.png");
+
+        sb.Append($"HEAD z={headState.Zoom:0.000} fy={headState.FocusY:0.000} tf={headTransform} ");
+        sb.Append($"TAIL z={tailState.Zoom:0.000} fy={tailState.FocusY:0.000} tf={tailTransform}");
+
+        return sb.ToString();
+    }
+
     /// <summary>自检辅助：素材库当前选中项在视口中的纵向中心（像素）。</summary>
     private double AssetCenterYForTest()
     {
@@ -2424,6 +2864,51 @@ public partial class MainWindow : Window
 
     /// <summary>自检访问器：时间轴控件。</summary>
     public Controls.TimelineControl TimelineForTest => Timeline;
+
+    /// <summary>
+    /// 播放探针：真实播放 N 秒，按 200ms 采样播放头、解码器当前素材、最近帧时间戳、两路是否共用帧缓冲。
+    /// 用于诊断"预览播放不连续/随机卡顿"。
+    /// </summary>
+    public async Task<string> PlayProbeAsync(double seconds, string logPath, double start = 0)
+    {
+        _time = Math.Clamp(start, 0, Math.Max(0, _project.TotalDuration - 0.1));
+        RenderFrame();
+        TogglePlay();
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("sample,global,expectPath,A_path,A_open,A_last,B_path,B_open,B_last,badge,sameBitmap");
+        var lastFrame = -1.0;
+        var stuck = 0;
+        var mismatch = 0;
+        var sameBitmap = 0;
+        var samples = 0;
+        var end = DateTime.Now.AddSeconds(Math.Max(0.5, seconds));
+        while (DateTime.Now < end && _playing)
+        {
+            await Task.Delay(200);
+            var (idx, _) = _project.Locate(_time);
+            var expect = idx >= 0 ? _project.Clips[idx].SourcePath : "-";
+            var pa = _videos[0];
+            var pb = _videos[1];
+            var aMatch = string.Equals(pa.CurrentPath, expect, StringComparison.OrdinalIgnoreCase);
+            var bMatch = string.Equals(pb.CurrentPath, expect, StringComparison.OrdinalIgnoreCase);
+            var last = aMatch ? pa.LastFrameTime : bMatch ? pb.LastFrameTime : -1;
+            var open = aMatch ? pa.IsOpen : bMatch ? pb.IsOpen : false;
+            if (_time > 0.5 && Math.Abs(last - lastFrame) < 0.001) stuck++;
+            lastFrame = last;
+            if (!aMatch && !bMatch) mismatch++;
+            var same = ReferenceEquals(ImgA.Source, ImgB.Source);
+            if (same) sameBitmap++;
+            sb.AppendLine($"{DateTime.Now:HH:mm:ss.fff},{_time:0.000},{expect}," +
+                          $"{pa.CurrentPath},{pa.IsOpen},{pa.LastFrameTime:0.000}," +
+                          $"{pb.CurrentPath},{pb.IsOpen},{pb.LastFrameTime:0.000}," +
+                          $"{TxtPreviewBadge.Text},{same}");
+            samples++;
+        }
+        if (_playing) PausePlayback();
+        File.WriteAllText(logPath, sb.ToString(), System.Text.Encoding.UTF8);
+        return $"samples={samples} stuck={stuck} mismatch={mismatch} sameBitmap={sameBitmap}";
+    }
 
     /// <summary>自检：选中第一个视频片段，把整窗渲染成 PNG，用于核对右侧属性面板排版。</summary>
     public string InspectorForTest(string outPath)
@@ -2817,7 +3302,7 @@ public partial class MainWindow : Window
         CompositionTarget.Rendering -= OnRendering;
         try
         {
-            _video.Close();
+            CloseVideos();
             _grabber.Dispose();
         }
         catch { }

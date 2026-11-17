@@ -19,6 +19,8 @@ public sealed class VideoFramePlayer : IDisposable
     private Process? _proc;
     private Thread? _reader;
     private volatile bool _running;
+    // 每次 Open/Close 递增；读取线程只认自己那一代，旧线程绝不能影响新进程的帧缓冲/运行标志。
+    private volatile int _generation;
     private int _frameBytes;
     private int _width;
     private int _height;
@@ -46,6 +48,7 @@ public sealed class VideoFramePlayer : IDisposable
         _fps = Math.Clamp(fps, 12, 60);
         _lastRequested = _startTime;
         CurrentPath = path;
+        var generation = ++_generation;
 
         var psi = new ProcessStartInfo(FfmpegService.Instance.FfmpegPath!)
         {
@@ -72,7 +75,7 @@ public sealed class VideoFramePlayer : IDisposable
             _proc.Start();
             _proc.BeginErrorReadLine();
             _running = true;
-            _reader = new Thread(ReadLoop) { IsBackground = true, Name = "VideoFrameReader" };
+            _reader = new Thread(() => ReadLoop(generation)) { IsBackground = true, Name = "VideoFrameReader" };
             _reader.Start();
         }
         catch
@@ -81,14 +84,15 @@ public sealed class VideoFramePlayer : IDisposable
         }
     }
 
-    private void ReadLoop()
+    private void ReadLoop(int generation)
     {
-        var stream = _proc?.StandardOutput.BaseStream;
+        var proc = _proc;
+        var stream = proc?.StandardOutput.BaseStream;
         if (stream is null) return;
         var buffer = new byte[_frameBytes];
         var index = 0;
 
-        while (_running)
+        while (_running && generation == _generation)
         {
             try
             {
@@ -96,7 +100,12 @@ public sealed class VideoFramePlayer : IDisposable
                 while (read < _frameBytes)
                 {
                     var n = stream.Read(buffer, read, _frameBytes - read);
-                    if (n <= 0) { _running = false; return; }
+                    if (n <= 0)
+                    {
+                        // 只有当前代才能置停止标志；旧进程被 Kill 后流结束是正常现象。
+                        if (generation == _generation) _running = false;
+                        return;
+                    }
                     read += n;
                 }
             }
@@ -112,13 +121,14 @@ public sealed class VideoFramePlayer : IDisposable
             {
                 // 背压：解码进度超前播放头 0.6 秒以上时暂停读取。
                 // 否则解码速度远快于实时播放，缓冲一路冲到视频结尾，画面会"快进"后定格在末帧
-                while (_running &&
+                while (_running && generation == _generation &&
                        _frames.Count >= 3 &&
                        _frames.Last!.Value.Time > _lastRequested + 0.6)
                 {
                     Monitor.Wait(_lock, 60);
                 }
-                if (!_running) return;
+                // 切换素材后旧线程的残留帧绝不能混进新缓冲，也不能改新进程状态
+                if (!_running || generation != _generation) return;
 
                 // 自适应丢帧：解码进度已经落后播放头太多时，直接跳过这些帧
                 if (ts < _lastRequested - 0.08) continue;
@@ -153,14 +163,20 @@ public sealed class VideoFramePlayer : IDisposable
     public void Close()
     {
         _running = false;
+        _generation++;                 // 作废仍在读取的旧线程
+        var proc = _proc;
+        _proc = null;
         try
         {
-            if (_proc is { HasExited: false }) _proc.Kill(true);
+            if (proc is { HasExited: false }) proc.Kill(true);
         }
         catch { }
-        try { _proc?.Dispose(); } catch { }
-        _proc = null;
-        lock (_lock) _frames.Clear();
+        try { proc?.Dispose(); } catch { }
+        lock (_lock)
+        {
+            _frames.Clear();
+            Monitor.PulseAll(_lock);   // 唤醒背压等待中的旧线程，让它按代号自行退出
+        }
         CurrentPath = null;
     }
 

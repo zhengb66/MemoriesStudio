@@ -28,6 +28,13 @@ public sealed class Clip : ObservableObject
     private double _faceH;
     private int _faceHv;
     private bool _faceDetected;
+
+    // 切换到「景物」时暂存原检测框，切回「人像」时原样恢复——避免强制景物清掉的数据丢失。
+    // 仅本次编辑会话有效，不写进工程文件（用户主动清掉的数据不应在重开工程后复活）。
+    [JsonIgnore] private bool _hasFaceBackup;
+    [JsonIgnore] private double _bkFaceX, _bkFaceY, _bkFaceSy, _bkFaceH;
+    [JsonIgnore] private int _bkFaceHv;
+    [JsonIgnore] private bool _bkFaceDetected;
     private string? _thumbnailPath;
 
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -151,6 +158,24 @@ public sealed class Clip : ObservableObject
     /// </summary>
     public int FaceHV { get => _faceHv; set => Set(ref _faceHv, value); }
     public bool FaceDetected { get => _faceDetected; set { Set(ref _faceDetected, value); Raise(nameof(FaceText)); } }
+
+    /// <summary>切到景物前暂存真实检测框（仅当确实有框时）。</summary>
+    public void BackupFaceBox()
+    {
+        if (FaceH <= 0.01) return;
+        _bkFaceX = FaceX; _bkFaceY = FaceY; _bkFaceSy = FaceSY;
+        _bkFaceH = FaceH; _bkFaceHv = FaceHV; _bkFaceDetected = FaceDetected;
+        _hasFaceBackup = true;
+    }
+
+    /// <summary>切回人像时恢复暂存的检测框；返回是否恢复成功。</summary>
+    public bool RestoreFaceBox()
+    {
+        if (!_hasFaceBackup) return false;
+        FaceX = _bkFaceX; FaceY = _bkFaceY; FaceSY = _bkFaceSy;
+        FaceH = _bkFaceH; FaceHV = _bkFaceHv; FaceDetected = _bkFaceDetected;
+        return true;
+    }
 
     [JsonIgnore] public string ThumbnailPath { get => _thumbnailPath ?? ""; set => Set(ref _thumbnailPath, value); }
 

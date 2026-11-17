@@ -178,6 +178,258 @@ public partial class App : Application
             return;
         }
 
+        // 导入取消选中 + 属性页分组自检：MemoriesStudio.exe --import-sel-test <素材路径> <输出png>
+        if (e.Args.Length >= 3 && e.Args[0] == "--import-sel-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var isWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = isWindow;
+            isWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    info = await isWindow.ImportSelectionForTest(e.Args[1], e.Args[2]);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex.Message;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_importsel.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
+        // 人像/景物切换运镜诊断：MemoriesStudio.exe --subject-toggle-test <照片> <输出png>
+        if (e.Args.Length >= 3 && e.Args[0] == "--subject-toggle-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var stWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = stWindow;
+            stWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    info = await stWindow.SubjectToggleForTest(e.Args[1], e.Args[2]);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex.Message;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_subjecttoggle.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
+        // 加入时间轴后素材库取消多选自检：MemoriesStudio.exe --add-sel-test <工程> <输出png>
+        if (e.Args.Length >= 3 && e.Args[0] == "--add-sel-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var asWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = asWindow;
+            asWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    info = await asWindow.AddSelectionForTest(e.Args[1], e.Args[2]);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex.Message;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_addsel.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
+        // 方向键尾帧定位自检：MemoriesStudio.exe --nav-tail-test <工程> <目标片段序号1起> <输出png>
+        // 目标需带前驱转场；验证 → 导航后播放头停在本片段独占区尾帧、预览不显示上一段
+        if (e.Args.Length >= 4 && e.Args[0] == "--nav-tail-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var ntWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = ntWindow;
+            ntWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    await ntWindow.OpenProjectForTest(e.Args[1]);
+                    await Task.Delay(600);
+                    info = ntWindow.NavTailForTest(
+                        int.Parse(e.Args[2], CultureInfo.InvariantCulture), e.Args[3]);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex.Message;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_navtail.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
+        // 图片属性页自检：MemoriesStudio.exe --face-ui-test <工程> <片段序号1起> <输出png>
+        if (e.Args.Length >= 4 && e.Args[0] == "--face-ui-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var fuiWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = fuiWindow;
+            fuiWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    await fuiWindow.OpenProjectForTest(e.Args[1]);
+                    await Task.Delay(400);
+                    info = fuiWindow.FaceUiForTest(
+                        int.Parse(e.Args[2], CultureInfo.InvariantCulture), e.Args[3]);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex.Message;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_faceui.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
+        // 图片默认字幕区间自检：MemoriesStudio.exe --img-cap-default-test <工程> <图片片段序号1起> <输出png>
+        // 验证图片默认字幕从 1 秒开始、片尾留 1 秒（正好错过首尾转场区）
+        if (e.Args.Length >= 4 && e.Args[0] == "--img-cap-default-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var icWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = icWindow;
+            icWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    await icWindow.OpenProjectForTest(e.Args[1]);
+                    await Task.Delay(600);
+                    info = icWindow.ImageCaptionDefaultForTest(
+                        int.Parse(e.Args[2], CultureInfo.InvariantCulture), e.Args[3]);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex.Message;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_imgcapdefault.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
+        // 字幕编辑自检：MemoriesStudio.exe --caption-test <工程> <片段序号1起> <片段内秒> <输出png>
+        // 验证默认字号 5%、新建字幕起点=播放头在片内位置、选择字幕列表项后播放头定位到区间中心
+        if (e.Args.Length >= 5 && e.Args[0] == "--caption-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var capWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = capWindow;
+            capWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    await capWindow.OpenProjectForTest(e.Args[1]);
+                    await Task.Delay(600);
+                    info = capWindow.CaptionForTest(
+                        int.Parse(e.Args[2], CultureInfo.InvariantCulture),
+                        double.Parse(e.Args[3], CultureInfo.InvariantCulture),
+                        e.Args[4]);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex.Message;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_caption.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
+        // 预览播放探针：MemoriesStudio.exe --play-probe <工程> <秒数> <输出csv>
+        if (e.Args.Length >= 4 && e.Args[0] == "--play-probe")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var probeWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = probeWindow;
+            probeWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    await probeWindow.OpenProjectForTest(e.Args[1]);
+                    info = await probeWindow.PlayProbeAsync(
+                        double.Parse(e.Args[2], CultureInfo.InvariantCulture), e.Args[3],
+                        e.Args.Length >= 5 ? double.Parse(e.Args[4], CultureInfo.InvariantCulture) : 0);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex.Message;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_playprobe.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
         // 关于对话框自检：MemoriesStudio.exe --about-test <输出目录>
         // 离屏渲染「设置窗口（含左下角关于按钮）」与「关于对话框」两图，便于核对排版
         if (e.Args.Length >= 2 && e.Args[0] == "--about-test")

@@ -18,7 +18,7 @@ public sealed class Caption : ObservableObject
     private string _text = "";
     private double _start;
     private double _end = 4.0;
-    private double _fontSizePct = 4.0;
+    private double _fontSizePct = 5.0;
     private string _colorPreset = "white";
     private CaptionPos _position = CaptionPos.Bottom;
     private double _fade = 0.4;
@@ -32,7 +32,7 @@ public sealed class Caption : ObservableObject
     /// <summary>消失时间（片段局部秒）。</summary>
     public double End { get => _end; set => Set(ref _end, value); }
 
-    /// <summary>字号，单位 = 画面高度的百分比（1080p 下 4% ≈ 43px），跨分辨率自适应。</summary>
+    /// <summary>字号，单位 = 画面高度的百分比（1080p 下 5% ≈ 54px），跨分辨率自适应。</summary>
     public double FontSizePct { get => _fontSizePct; set => Set(ref _fontSizePct, Math.Clamp(value, 2, 12)); }
 
     /// <summary>颜色预设键：white / yellow / orange / cyan / black。</summary>
