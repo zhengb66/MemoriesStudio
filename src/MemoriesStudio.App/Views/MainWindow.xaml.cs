@@ -761,29 +761,6 @@ public partial class MainWindow : Window
         return null;
     }
 
-    /// <summary>光标键左右：横向滚动时间轴视口。</summary>
-    private void ScrollTimelineBy(double pixels)
-    {
-        TimelineScroll.UpdateLayout();   // 连续按键落在同一帧时先刷新 Offset，避免丢步
-        var max = Math.Max(0, TimelineScroll.ScrollableWidth);
-        TimelineScroll.ScrollToHorizontalOffset(
-            Math.Clamp(TimelineScroll.HorizontalOffset + pixels, 0, max));
-    }
-
-    /// <summary>光标键上下：逐行滚动素材库（只滚视口，不改选择）。</summary>
-    private void ScrollAssetsBy(int rows)
-    {
-        var sv = FindDescendant<ScrollViewer>(AssetsList);
-        if (sv is null) return;
-
-        sv.UpdateLayout();   // 同上：先让上一次滚动的 Offset 落地
-
-        // 虚拟化列表的 Offset 以项为单位，滚 1 项即一行；非虚拟化时按像素（一行约 62px）
-        var step = sv.CanContentScroll ? 1.0 : 62.0;
-        var max = Math.Max(0, sv.ScrollableHeight);
-        sv.ScrollToVerticalOffset(Math.Clamp(sv.VerticalOffset + rows * step, 0, max));
-    }
-
     private void OnTimelineSeek(object? sender, double time) => PreviewSeek(time);
 
     /// <summary>时间轴上拖动片段调整顺序后：刷新界面并标记工程已修改。</summary>
@@ -2143,20 +2120,35 @@ public partial class MainWindow : Window
         enc.Frames.Add(BitmapFrame.Create(rtb));
         using (var fs = File.Create(outPath)) enc.Save(fs);
 
-        // 模拟光标键：→ 右滚时间轴 ×3、↓ 下滚素材库 ×2，验证窗口级键盘路由生效
-        var h0 = TimelineScroll.HorizontalOffset;
-        var a0 = FindDescendant<ScrollViewer>(AssetsList)?.VerticalOffset ?? -1;
+        // 模拟键盘导航：→×3 相邻、↓ 翻页、Home/End 首尾，验证选中索引与素材库跟随
+        var page = Timeline.VisibleClipCount();
+        var nav = new List<string>();
+        int Idx() => Timeline.Selected is null ? -1 : _project.Clips.IndexOf(Timeline.Selected);
+
         SendTestKey(Key.Right); SendTestKey(Key.Right); SendTestKey(Key.Right);
-        SendTestKey(Key.Down); SendTestKey(Key.Down);
-        UpdateLayout();
-        var h1 = TimelineScroll.HorizontalOffset;
-        var a1 = FindDescendant<ScrollViewer>(AssetsList)?.VerticalOffset ?? -1;
+        nav.Add($"R3={Idx() + 1}");
+        SendTestKey(Key.Down);
+        nav.Add($"Dn={Idx() + 1}(+{page})");
+        SendTestKey(Key.Up);
+        nav.Add($"Up={Idx() + 1}");
+        SendTestKey(Key.Home);
+        nav.Add($"Home={Idx() + 1} assetCenterY={AssetCenterYForTest()}");
+        SendTestKey(Key.End);
+        nav.Add($"End={Idx() + 1}");
 
         return $"OK index={i + 1} clip={clip.FileName} asset={asset?.FileName ?? "-"} " +
                $"offset={sv?.VerticalOffset:0.0} viewport={sv?.ViewportHeight:0.0} " +
-               $"extent={sv?.ExtentHeight:0.0} listH={AssetsList.ActualHeight:0.0} " +
-               $"centerY={pos} selected={AssetsList.SelectedItems.Count} " +
-               $"keys tl {h0:0.0}->{h1:0.0} assets {a0:0.0}->{a1:0.0}";
+               $"centerY={pos} selected={AssetsList.SelectedItems.Count} page={page} " +
+               string.Join(" ", nav);
+    }
+
+    /// <summary>自检辅助：素材库当前选中项在视口中的纵向中心（像素）。</summary>
+    private double AssetCenterYForTest()
+    {
+        if (AssetsList.SelectedItem is not MediaAsset a) return -1;
+        if (AssetsList.ItemContainerGenerator.ContainerFromItem(a) is not ListBoxItem c) return -1;
+        var sv = FindDescendant<ScrollViewer>(AssetsList);
+        return sv is null ? -1 : c.TranslatePoint(new Point(0, c.ActualHeight / 2), sv).Y;
     }
 
     private void SendTestKey(Key key)
@@ -2386,17 +2378,22 @@ public partial class MainWindow : Window
             e.Handled = true;
         }
         else if (!inText && Timeline.SelectedClips.Count > 0 && !AssetsList.IsKeyboardFocusWithin
-                 && e.Key is Key.Left or Key.Right or Key.Up or Key.Down)
+                 && e.Key is Key.Left or Key.Right or Key.Up or Key.Down or Key.Home or Key.End)
         {
-            // 时间轴上有选中片段时：左右滚动时间轴视口，上下逐行滚动素材库
-            var page = Math.Max(80, TimelineScroll.ViewportWidth * 0.12);
-            switch (e.Key)
+            // 键盘导航：←/→ 相邻片段，↑/↓ 翻页（按视口可见片段数），Home/End 首尾。
+            // SelectClipAt 内部会滚入视口、跳播放头并触发 SelectionChanged（素材库与属性页同步）
+            var clips = Timeline.Project!.Clips;
+            var cur = Timeline.Selected is null ? 0 : Math.Max(0, clips.IndexOf(Timeline.Selected));
+            var target = e.Key switch
             {
-                case Key.Left: ScrollTimelineBy(-page); break;
-                case Key.Right: ScrollTimelineBy(+page); break;
-                case Key.Up: ScrollAssetsBy(-1); break;
-                case Key.Down: ScrollAssetsBy(+1); break;
-            }
+                Key.Left => cur - 1,
+                Key.Right => cur + 1,
+                Key.Up => cur - Timeline.VisibleClipCount(),
+                Key.Down => cur + Timeline.VisibleClipCount(),
+                Key.Home => 0,
+                _ => clips.Count - 1,
+            };
+            Timeline.SelectClipAt(target);
             e.Handled = true;
         }
     }

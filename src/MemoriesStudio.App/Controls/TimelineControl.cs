@@ -193,6 +193,63 @@ public sealed class TimelineControl : FrameworkElement
         InvalidateVisual();
     }
 
+    // ---------------------------------------------------------------- 键盘导航
+
+    /// <summary>
+    /// 估计视口内能看到多少个片段（按平均宽度），用作 ↑/↓ 翻页的步长。
+    /// </summary>
+    public int VisibleClipCount()
+    {
+        var project = Project;
+        if (project is null || project.Clips.Count == 0) return 1;
+        var per = Math.Max(1, project.TotalDuration * _pps / project.Clips.Count);
+        var vp = Math.Max(1, GetViewportBounds().Width);
+        return Math.Max(1, (int)(vp / per));
+    }
+
+    /// <summary>
+    /// 把选中移到第 index 个片段（0 起，越界自动钳到首尾）：
+    /// 更新选中、把片段滚入视口、播放头跳到片段起点并通知预览，
+    /// 触发 SelectionChanged（属性面板与素材库随之同步）。无片段时返回 -1。
+    /// </summary>
+    public int SelectClipAt(int index)
+    {
+        var project = Project;
+        if (project is null || project.Clips.Count == 0) return -1;
+        index = Math.Clamp(index, 0, project.Clips.Count - 1);
+        var clip = project.Clips[index];
+
+        SelectedClips.Clear();
+        SelectedClips.Add(clip);
+        Selected = clip;
+        EnsureClipOnScreen(index);
+        InvalidateVisual();
+
+        Playhead = Math.Max(0, project.ComputeStarts()[index]);
+        SeekRequested?.Invoke(this, Playhead);
+        SelectionChanged?.Invoke(this, clip);
+        return index;
+    }
+
+    /// <summary>把第 index 个片段滚入视口（贴边留 12px 余量）。</summary>
+    private void EnsureClipOnScreen(int index)
+    {
+        var project = Project!;
+        var starts = project.ComputeStarts();
+        var x0 = starts[index] * _pps;
+        var x1 = x0 + Math.Max(6, project.Clips[index].Duration * _pps);
+
+        var sv = _scrollHost ?? FindScrollHost();
+        if (sv is null) return;
+        var vp = sv.ViewportWidth;
+        var off = sv.HorizontalOffset;
+
+        if (x0 < off + 12)
+            sv.ScrollToHorizontalOffset(Math.Max(0, x0 - 12));
+        else if (x1 > off + vp - 12)
+            sv.ScrollToHorizontalOffset(Math.Min(Math.Max(0, sv.ScrollableWidth), x1 - vp + 12));
+    }
+
     // ---------------------------------------------------------------- 布局
 
     protected override Size MeasureOverride(Size availableSize)
