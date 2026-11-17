@@ -47,6 +47,7 @@ public sealed class VideoFramePlayer : IDisposable
         _startTime = Math.Max(0, startTime);
         _fps = Math.Clamp(fps, 12, 60);
         _lastRequested = _startTime;
+        LastFrameTime = -1;   // 新素材/新片段的首帧未到之前不能沿用上一路的时间戳
         CurrentPath = path;
         var generation = ++_generation;
 
@@ -178,6 +179,7 @@ public sealed class VideoFramePlayer : IDisposable
             Monitor.PulseAll(_lock);   // 唤醒背压等待中的旧线程，让它按代号自行退出
         }
         CurrentPath = null;
+        LastFrameTime = -1;
     }
 
     public void Dispose() => Close();

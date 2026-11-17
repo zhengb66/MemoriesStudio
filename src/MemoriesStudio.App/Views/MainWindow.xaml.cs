@@ -61,6 +61,9 @@ public partial class MainWindow : Window
 
     private readonly bool[] _videoNeedsSeek = { true, true };
     private readonly double[] _videoOpenAt = new double[2];
+    // 解码器绑定到「片段实例」而不是文件路径：同一视频重复入轨时，路径相同但片段不同，
+    // 仍必须切换/重开解码器，否则主画面会停在上一段尾帧。
+    private readonly Guid?[] _videoClipId = new Guid?[2];
     private bool _uiReady;      // InitializeComponent 期间控件会触发 ValueChanged，未就绪时忽略
 
     // 抓帧队列：仅保留最新请求，旧结果作废
@@ -1424,11 +1427,12 @@ public partial class MainWindow : Window
         }
         else
         {
-            // 转场结束时 ImgB 那一路已经在解码当前素材了：直接交换两路解码器/帧缓冲，
+            // 转场结束时 ImgB 那一路已经在解码当前片段了：直接交换两路解码器/帧缓冲，
             // 不必再为 ImgA 重开 ffmpeg（重开要等首帧，会看到半秒定格）。
+            // 必须用片段 Id 判断：同一视频重复入轨时路径相同，按路径判断会漏掉交换。
             if (_videos[1].FrameWidth > 0 &&
                 string.Equals(_videos[1].CurrentPath, cur.SourcePath, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(_videos[0].CurrentPath, cur.SourcePath, StringComparison.OrdinalIgnoreCase))
+                _videoClipId[1] == cur.Id && _videoClipId[0] != cur.Id)
                 SwapVideoLayers();
 
             FillLayer(ImgA, cur, local);
@@ -1775,13 +1779,17 @@ public partial class MainWindow : Window
         if (_scrubPreview) return;   // 暂停状态下走快速抓帧，不启动流式解码
         var player = _videos[layer];
         var target = clip.SourceIn + local;
+        // 片段实例变化时必须重定位：重复视频的路径相同，但新片段的 SourceIn/local 通常要
+        // 从更早的位置重新起播；不重开会让解码线程停在上一段的背压等待里，画面定格。
         var reopen = _videoNeedsSeek[layer]
+                     || _videoClipId[layer] != clip.Id
                      || !string.Equals(player.CurrentPath, clip.SourcePath, StringComparison.OrdinalIgnoreCase)
                      || (!_playing && Math.Abs(target - _videoOpenAt[layer]) > 0.12);
 
         if (!reopen) return;
 
         player.Open(clip.SourcePath, target, _project.Fps);
+        _videoClipId[layer] = clip.Id;
         _videoOpenAt[layer] = target;
         _videoNeedsSeek[layer] = false;
     }
@@ -1793,6 +1801,7 @@ public partial class MainWindow : Window
         (_videoBitmaps[0], _videoBitmaps[1]) = (_videoBitmaps[1], _videoBitmaps[0]);
         (_videoNeedsSeek[0], _videoNeedsSeek[1]) = (_videoNeedsSeek[1], _videoNeedsSeek[0]);
         (_videoOpenAt[0], _videoOpenAt[1]) = (_videoOpenAt[1], _videoOpenAt[0]);
+        (_videoClipId[0], _videoClipId[1]) = (_videoClipId[1], _videoClipId[0]);
         if (_videoBitmaps[0] is { } a) ImgA.Source = a;
         if (_videoBitmaps[1] is { } b) ImgB.Source = b;
     }
@@ -1808,6 +1817,8 @@ public partial class MainWindow : Window
     {
         _videos[0].Close();
         _videos[1].Close();
+        _videoClipId[0] = null;
+        _videoClipId[1] = null;
     }
 
     // ==================================================================== 播放
@@ -2876,7 +2887,7 @@ public partial class MainWindow : Window
         TogglePlay();
 
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine("sample,global,expectPath,A_path,A_open,A_last,B_path,B_open,B_last,badge,sameBitmap");
+        sb.AppendLine("sample,global,idx,expectPath,A_path,A_clip,A_open,A_last,B_path,B_clip,B_open,B_last,badge,sameBitmap");
         var lastFrame = -1.0;
         var stuck = 0;
         var mismatch = 0;
@@ -2887,21 +2898,28 @@ public partial class MainWindow : Window
         {
             await Task.Delay(200);
             var (idx, _) = _project.Locate(_time);
-            var expect = idx >= 0 ? _project.Clips[idx].SourcePath : "-";
+            var expectClip = idx >= 0 ? _project.Clips[idx] : null;
+            var expect = expectClip?.SourcePath ?? "-";
             var pa = _videos[0];
             var pb = _videos[1];
-            var aMatch = string.Equals(pa.CurrentPath, expect, StringComparison.OrdinalIgnoreCase);
-            var bMatch = string.Equals(pb.CurrentPath, expect, StringComparison.OrdinalIgnoreCase);
+            // 同一视频重复入轨时路径相同，必须同时比对片段 Id，否则会把上一段的解码器误当成当前段。
+            var aMatch = expectClip is not null && _videoClipId[0] == expectClip.Id &&
+                         string.Equals(pa.CurrentPath, expect, StringComparison.OrdinalIgnoreCase);
+            var bMatch = expectClip is not null && _videoClipId[1] == expectClip.Id &&
+                         string.Equals(pb.CurrentPath, expect, StringComparison.OrdinalIgnoreCase);
             var last = aMatch ? pa.LastFrameTime : bMatch ? pb.LastFrameTime : -1;
-            var open = aMatch ? pa.IsOpen : bMatch ? pb.IsOpen : false;
-            if (_time > 0.5 && Math.Abs(last - lastFrame) < 0.001) stuck++;
-            lastFrame = last;
+            // 启动瞬间还没有首帧（last=-1）不算停滞；只统计已有帧时间戳后的停滞。
+            if (last >= 0)
+            {
+                if (_time > 0.5 && Math.Abs(last - lastFrame) < 0.001) stuck++;
+                lastFrame = last;
+            }
             if (!aMatch && !bMatch) mismatch++;
             var same = ReferenceEquals(ImgA.Source, ImgB.Source);
             if (same) sameBitmap++;
-            sb.AppendLine($"{DateTime.Now:HH:mm:ss.fff},{_time:0.000},{expect}," +
-                          $"{pa.CurrentPath},{pa.IsOpen},{pa.LastFrameTime:0.000}," +
-                          $"{pb.CurrentPath},{pb.IsOpen},{pb.LastFrameTime:0.000}," +
+            sb.AppendLine($"{DateTime.Now:HH:mm:ss.fff},{_time:0.000},{idx + 1},{expect}," +
+                          $"{pa.CurrentPath},{_videoClipId[0]},{pa.IsOpen},{pa.LastFrameTime:0.000}," +
+                          $"{pb.CurrentPath},{_videoClipId[1]},{pb.IsOpen},{pb.LastFrameTime:0.000}," +
                           $"{TxtPreviewBadge.Text},{same}");
             samples++;
         }
