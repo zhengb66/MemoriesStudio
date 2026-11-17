@@ -2120,11 +2120,16 @@ public partial class MainWindow : Window
         enc.Frames.Add(BitmapFrame.Create(rtb));
         using (var fs = File.Create(outPath)) enc.Save(fs);
 
-        // 模拟键盘导航：→×3 相邻、↓ 翻页、Home/End 首尾，验证选中索引与素材库跟随
+        // 模拟键盘导航（真实路由：从窗口开始隧道→未处理再冒泡给焦点元素）
         var page = Timeline.VisibleClipCount();
         var nav = new List<string>();
         int Idx() => Timeline.Selected is null ? -1 : _project.Clips.IndexOf(Timeline.Selected);
 
+        AssetsList.Focus();                    // 场景A：焦点在素材库，方向键应留给素材库
+        SendTestKey(Key.Right);
+        nav.Add($"listFocusStill={Idx() + 1}");
+
+        Timeline.Focus();                      // 场景B：焦点在时间轴，六键导航生效
         SendTestKey(Key.Right); SendTestKey(Key.Right); SendTestKey(Key.Right);
         nav.Add($"R3={Idx() + 1}");
         SendTestKey(Key.Down);
@@ -2132,9 +2137,9 @@ public partial class MainWindow : Window
         SendTestKey(Key.Up);
         nav.Add($"Up={Idx() + 1}");
         SendTestKey(Key.Home);
-        nav.Add($"Home={Idx() + 1} assetCenterY={AssetCenterYForTest()}");
+        nav.Add($"Home={Idx() + 1} assetCenterY={AssetCenterYForTest():0}");
         SendTestKey(Key.End);
-        nav.Add($"End={Idx() + 1}");
+        nav.Add($"End={Idx() + 1} focus={Keyboard.FocusedElement?.GetType().Name ?? "null"}");
 
         return $"OK index={i + 1} clip={clip.FileName} asset={asset?.FileName ?? "-"} " +
                $"offset={sv?.VerticalOffset:0.0} viewport={sv?.ViewportHeight:0.0} " +
@@ -2151,25 +2156,27 @@ public partial class MainWindow : Window
         return sv is null ? -1 : c.TranslatePoint(new Point(0, c.ActualHeight / 2), sv).Y;
     }
 
-    /// <summary>自检用：向时间轴控件发一个真实路由的按键（先 PreviewKeyDown 隧道，再 KeyDown 冒泡）。</summary>
+    /// <summary>自检用：走真实路由发按键——先从窗口隧道 PreviewKeyDown，未处理再给焦点元素 KeyDown。</summary>
     private void SendTestKey(Key key)
     {
         var source = PresentationSource.FromVisual(this);
         if (source is null) return;
-        Timeline.Focus();
 
         var args = new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, key)
         {
             RoutedEvent = Keyboard.PreviewKeyDownEvent
         };
-        Timeline.RaiseEvent(args);
-        if (args.Handled) return;   // 与真实输入一致：隧道阶段被吃掉就不再走冒泡
+        RaiseEvent(args);              // 窗口隧道阶段（与真实输入一致）
+        if (args.Handled) return;
 
-        var down = new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, key)
+        if (Keyboard.FocusedElement is UIElement fe)
         {
-            RoutedEvent = Keyboard.KeyDownEvent
-        };
-        Timeline.RaiseEvent(down);
+            var down = new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, key)
+            {
+                RoutedEvent = Keyboard.KeyDownEvent
+            };
+            fe.RaiseEvent(down);
+        }
     }
 
     /// <summary>自检访问器：时间轴控件。</summary>
@@ -2387,6 +2394,47 @@ public partial class MainWindow : Window
             else if (_selected is not null) RemoveClips(new[] { _selected });
             e.Handled = true;
         }
+    }
+
+    /// <summary>
+    /// 键盘导航片段选中（窗口隧道阶段拦截）：←/→ 相邻、↑/↓ 翻页、Home/End 首尾。
+    /// 必须在 PreviewKeyDown 隧道里做——方向键若放走会被 KeyboardNavigation 的
+    /// 方向焦点移动吃掉；也不能只放在时间轴控件里——焦点不在时间轴时（如刚双击素材
+    /// 加入、焦点还在素材库）控件根本收不到按键。文本框/滑块/列表等真正使用
+    /// 方向键的控件直接放行。
+    /// </summary>
+    protected override void OnPreviewKeyDown(KeyEventArgs e)
+    {
+        base.OnPreviewKeyDown(e);
+
+        if (e.Key is not (Key.Left or Key.Right or Key.Up or Key.Down or Key.Home or Key.End)) return;
+        if (Timeline.SelectedClips.Count == 0) return;
+
+        // 这些控件自己要用方向键/Home/End，放行（ToggleButton 已含在 ButtonBase 里）
+        switch (Keyboard.FocusedElement)
+        {
+            case System.Windows.Controls.Primitives.TextBoxBase:
+            case Slider:
+            case ComboBox:
+            case ListBox:
+            case System.Windows.Controls.Primitives.ButtonBase:
+            case System.Windows.Controls.Primitives.ScrollBar:
+                return;
+        }
+
+        var clips = Timeline.Project!.Clips;
+        var cur = Timeline.Selected is null ? 0 : Math.Max(0, clips.IndexOf(Timeline.Selected));
+        var target = e.Key switch
+        {
+            Key.Left => cur - 1,
+            Key.Right => cur + 1,
+            Key.Up => cur - Timeline.VisibleClipCount(),
+            Key.Down => cur + Timeline.VisibleClipCount(),
+            Key.Home => 0,
+            _ => clips.Count - 1,
+        };
+        Timeline.SelectClipAt(target);
+        e.Handled = true;
     }
 
     /// <summary>

@@ -250,34 +250,6 @@ public sealed class TimelineControl : FrameworkElement
             sv.ScrollToHorizontalOffset(Math.Min(Math.Max(0, sv.ScrollableWidth), x1 - vp + 12));
     }
 
-    /// <summary>
-    /// 键盘导航片段选中：←/→ 相邻、↑/↓ 翻页（按视口可见片段数）、Home/End 首尾。
-    /// 必须在 PreviewKeyDown（隧道）里拦截——方向键若放走，会被 WPF 的
-    /// KeyboardNavigation 当作"方向移动焦点"吃掉，永远到不了窗口级 KeyDown。
-    /// </summary>
-    protected override void OnPreviewKeyDown(KeyEventArgs e)
-    {
-        base.OnPreviewKeyDown(e);
-        if (Project is null || Project.Clips.Count == 0 || SelectedClips.Count == 0) return;
-
-        var clips = Project.Clips;
-        var cur = Selected is null ? 0 : Math.Max(0, clips.IndexOf(Selected));
-        var target = e.Key switch
-        {
-            Key.Left => cur - 1,
-            Key.Right => cur + 1,
-            Key.Up => cur - VisibleClipCount(),
-            Key.Down => cur + VisibleClipCount(),
-            Key.Home => 0,
-            Key.End => clips.Count - 1,
-            _ => (int?)null,
-        };
-        if (target is null) return;
-
-        SelectClipAt(target.Value);
-        e.Handled = true;
-    }
-
     // ---------------------------------------------------------------- 布局
 
     protected override Size MeasureOverride(Size availableSize)
