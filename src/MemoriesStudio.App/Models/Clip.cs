@@ -32,6 +32,15 @@ public sealed class Clip : ObservableObject
 
     public Guid Id { get; set; } = Guid.NewGuid();
 
+    private List<Caption> _captions = new();
+    /// <summary>
+    /// 片段内的硬字幕（图片通常一段、视频可多段）。随片段保存与删除，无独立字幕轨；
+    /// 时间为片段局部秒，拖动片段顺序时字幕自然跟随。
+    /// </summary>
+    public List<Caption> Captions { get => _captions; set { Set(ref _captions, value); Raise(nameof(HasCaptions)); } }
+
+    [JsonIgnore] public bool HasCaptions => Captions.Any(c => c.IsValid);
+
     public string SourcePath
     {
         get => _sourcePath;
@@ -47,11 +56,16 @@ public sealed class Clip : ObservableObject
     /// </summary>
     public string? StillFrom { get; set; }
 
-    /// <summary>该片段在成片中的显示时长（秒）。</summary>
+    /// <summary>该片段在成片中的显示时长（秒）。缩短时把字幕区间收回界内。</summary>
     public double Duration
     {
         get => _duration;
-        set { Set(ref _duration, Math.Clamp(value, 0.3, 3600)); Raise(nameof(DurationText)); }
+        set
+        {
+            Set(ref _duration, Math.Clamp(value, 0.3, 3600));
+            foreach (var c in _captions) c.ClampTo(_duration);
+            Raise(nameof(DurationText));
+        }
     }
 
     /// <summary>视频素材的入点（秒）。</summary>

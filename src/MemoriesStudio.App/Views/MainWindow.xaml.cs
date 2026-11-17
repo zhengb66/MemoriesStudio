@@ -83,6 +83,11 @@ public partial class MainWindow : Window
         CmbTransition.ItemsSource = TransitionInfo.All
             .Select(t => new Choice<TransitionKind>(t, t.ToDisplay())).ToList();
 
+        CmbCaptionColor.ItemsSource = new[] { "white", "yellow", "orange", "cyan", "black" }
+            .Select(p => new Choice<string>(p, Caption.PresetLabel(p))).ToList();
+        CmbCaptionPos.ItemsSource = new[] { (CaptionPos.Bottom, "底部居中"), (CaptionPos.Top, "顶部居中") }
+            .Select(p => new Choice<CaptionPos>(p.Item1, p.Item2)).ToList();
+
         Timeline.SelectionChanged += OnTimelineSelectionChanged;
         Timeline.SelectionSetChanged += (_, _) => RefreshInspector();
         Timeline.SeekRequested += OnTimelineSeek;
@@ -846,6 +851,8 @@ public partial class MainWindow : Window
                 SldTransition.Value = c.TransitionDuration;
                 TxtTransitionDur.Text = $"{c.TransitionDuration:0.0}s";
                 TxtFaceStatus.Text = c.FaceText;
+
+                RefreshCaptionPanel(c);
             }
         }
         finally
@@ -854,6 +861,235 @@ public partial class MainWindow : Window
         }
 
         UpdateFaceBox(_selected);
+    }
+
+    // ==================================================================== 字幕（与片段绑定，导出烧录）
+
+    private Caption? _editingCaption;
+    private readonly List<TextBlock> _captionBlocks = new();
+
+    /// <summary>
+    /// 在预览覆盖层显示当前时间点上的字幕（样式与导出 drawtext 同一套换算：
+    /// 字号 = 画面高 × 百分比、边距 = 画面高 × EdgeMarginPct%、淡入淡出 alpha）。
+    /// </summary>
+    private void UpdateCaptionOverlay(params (Clip clip, double local)[] items)
+    {
+        foreach (var tb in _captionBlocks) OverlayCanvas.Children.Remove(tb);
+        _captionBlocks.Clear();
+
+        foreach (var (clip, local) in items)
+            foreach (var cap in clip.Captions.Where(c => c.IsValid && local >= c.Start && local <= c.End))
+                _captionBlocks.Add(BuildCaptionBlock(cap, local));
+    }
+
+    private TextBlock BuildCaptionBlock(Caption cap, double local)
+    {
+        var w = PreviewRoot.ActualWidth;
+        var h = PreviewRoot.ActualHeight;
+        var px = Math.Max(10, h * cap.FontSizePct / 100.0);
+        var (fill, _) = Caption.Colors(cap.ColorPreset);
+
+        var alpha = 1.0;
+        if (cap.Fade > 0.001)
+            alpha = Math.Clamp(Math.Min((local - cap.Start) / cap.Fade, (cap.End - local) / cap.Fade), 0, 1);
+
+        var tb = new TextBlock
+        {
+            Text = cap.Text,
+            FontSize = px,
+            FontFamily = new FontFamily("Microsoft YaHei UI"),
+            Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(fill)),
+            MaxWidth = w * 0.9,
+            TextWrapping = TextWrapping.Wrap,
+            TextAlignment = TextAlignment.Center,
+            Opacity = alpha,
+            // 用阴影模拟导出的黑/白描边
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                Color = cap.ColorPreset == "black" ? Colors.White : Colors.Black,
+                ShadowDepth = 0,
+                BlurRadius = Math.Max(2, px * 0.12),
+                Opacity = 0.9
+            }
+        };
+
+        OverlayCanvas.Children.Add(tb);
+        tb.Measure(new Size(w * 0.9, double.PositiveInfinity));
+        var margin = h * Caption.EdgeMarginPct / 100.0;
+        var y = cap.Position == CaptionPos.Top ? margin : h - margin - tb.DesiredSize.Height;
+        Canvas.SetLeft(tb, (w - tb.DesiredSize.Width) / 2);
+        Canvas.SetTop(tb, y);
+        return tb;
+    }
+
+    /// <summary>刷新属性面板的字幕区：图片=固定一段（默认整段），视频=多段列表。</summary>
+    private void RefreshCaptionPanel(Clip clip)
+    {
+        var oldSuppress = _suppressUi;
+        _suppressUi = true;
+        try
+        {
+            // 图片默认给一段全区间字幕（可直接打字使用）；视频从空开始
+            if (clip.IsImage && clip.Captions.Count == 0)
+                clip.Captions.Add(new Caption { Start = 0, End = clip.Duration });
+
+            var caps = clip.Captions;
+            CaptionPanel.Visibility = Visibility.Visible;
+            BtnCaptionAdd.Visibility = (clip.IsVideo || caps.Count == 0) ? Visibility.Visible : Visibility.Collapsed;
+            BtnCaptionAdd.Content = caps.Count == 0 ? "＋ 添加字幕" : "＋ 添加";
+            BtnCaptionDel.Visibility = caps.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+            LstCaptions.Visibility = clip.IsVideo && caps.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            if (LstCaptions.ItemsSource is null || !ReferenceEquals(LstCaptions.Tag, clip))
+            {
+                LstCaptions.ItemsSource = caps;
+                LstCaptions.Tag = clip;
+            }
+            else
+            {
+                LstCaptions.Items.Refresh();
+            }
+
+            // 当前编辑段：优先保持列表选择；列表不可见时取唯一一段
+            var cap = LstCaptions.SelectedItem as Caption ?? caps.FirstOrDefault();
+            if (LstCaptions.Visibility == Visibility.Visible && cap is not null)
+                LstCaptions.SelectedItem = cap;
+            SetEditingCaption(cap, clip);
+        }
+        finally
+        {
+            _suppressUi = oldSuppress;
+        }
+    }
+
+    private void SetEditingCaption(Caption? cap, Clip clip)
+    {
+        _editingCaption = cap;
+        var oldSuppress = _suppressUi;
+        _suppressUi = true;
+        try
+        {
+            if (cap is null)
+            {
+                CaptionEditor.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            CaptionEditor.Visibility = Visibility.Visible;
+            TxtCaption.Text = cap.Text;
+            SldCaptionFont.Value = cap.FontSizePct;
+            TxtCaptionFont.Text = $"{cap.FontSizePct:0.#}%";
+            CmbCaptionColor.SelectedItem = CmbCaptionColor.Items.Cast<Choice<string>>()
+                .FirstOrDefault(x => x.Value == cap.ColorPreset);
+            CmbCaptionPos.SelectedItem = CmbCaptionPos.Items.Cast<Choice<CaptionPos>>()
+                .FirstOrDefault(x => x.Value == cap.Position);
+
+            SldCaptionStart.Maximum = clip.Duration;
+            SldCaptionEnd.Maximum = clip.Duration;
+            SldCaptionStart.Value = cap.Start;
+            SldCaptionEnd.Value = cap.End;
+            TxtCaptionStart.Text = $"{cap.Start:0.0}s";
+            TxtCaptionEnd.Text = $"{cap.End:0.0}s";
+        }
+        finally
+        {
+            _suppressUi = oldSuppress;
+        }
+    }
+
+    /// <summary>字幕参数变化后的公共收尾：标脏 + 刷新预览与时间轴标识。</summary>
+    private void CaptionChanged()
+    {
+        if (_suppressUi) return;
+        MarkDirty();
+        RenderFrame();
+        Timeline.InvalidateVisual();
+    }
+
+    private void OnCaptionAdd(object sender, RoutedEventArgs e)
+    {
+        if (_selected is not { } clip) return;
+        var local = Math.Clamp(_time - _project.Clips.TakeWhile(c => c != clip).Sum(c => c.Duration), 0, clip.Duration);
+        var cap = new Caption
+        {
+            Start = Math.Min(local, Math.Max(0, clip.Duration - 1.0)),
+            End = Math.Min(local + 2.0, clip.Duration),
+            Text = ""
+        };
+        if (cap.End <= cap.Start) { cap.Start = 0; cap.End = Math.Min(2.0, clip.Duration); }
+        clip.Captions.Add(cap);
+        _suppressUi = true;
+        LstCaptions.ItemsSource = null;
+        LstCaptions.ItemsSource = clip.Captions;
+        LstCaptions.Tag = clip;
+        LstCaptions.SelectedItem = cap;
+        _suppressUi = false;
+        RefreshCaptionPanel(clip);
+        MarkDirty();
+        Timeline.InvalidateVisual();
+        TxtCaption.Focus();
+    }
+
+    private void OnCaptionDelete(object sender, RoutedEventArgs e)
+    {
+        if (_selected is not { } clip || _editingCaption is not { } cap) return;
+        clip.Captions.Remove(cap);
+        _editingCaption = null;
+        LstCaptions.ItemsSource = null;
+        LstCaptions.Tag = null;
+        RefreshCaptionPanel(clip);
+        MarkDirty();
+        RenderFrame();
+        Timeline.InvalidateVisual();
+    }
+
+    private void OnCaptionSelected(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressUi) return;
+        if (_selected is { } clip)
+            SetEditingCaption(LstCaptions.SelectedItem as Caption, clip);
+    }
+
+    private void OnCaptionTextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_suppressUi || _editingCaption is not { } cap) return;
+        cap.Text = TxtCaption.Text;
+        CaptionChanged();
+    }
+
+    private void OnCaptionFontChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_suppressUi || _editingCaption is not { } cap) return;
+        cap.FontSizePct = e.NewValue;
+        TxtCaptionFont.Text = $"{e.NewValue:0.#}%";
+        CaptionChanged();
+    }
+
+    private void OnCaptionStyleChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressUi || _editingCaption is not { } cap) return;
+        if (CmbCaptionColor.SelectedItem is Choice<string> color) cap.ColorPreset = color.Value;
+        if (CmbCaptionPos.SelectedItem is Choice<CaptionPos> pos) cap.Position = pos.Value;
+        CaptionChanged();
+    }
+
+    private void OnCaptionStartChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_suppressUi || _editingCaption is not { } cap) return;
+        cap.Start = Math.Min(e.NewValue, cap.End - 0.2);
+        SldCaptionStart.Value = cap.Start;
+        TxtCaptionStart.Text = $"{cap.Start:0.0}s";
+        CaptionChanged();
+    }
+
+    private void OnCaptionEndChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_suppressUi || _editingCaption is not { } cap) return;
+        var dur = _selected?.Duration ?? cap.End;
+        cap.End = Math.Max(Math.Min(e.NewValue, dur), cap.Start + 0.2);
+        SldCaptionEnd.Value = cap.End;
+        TxtCaptionEnd.Text = $"{cap.End:0.0}s";
+        CaptionChanged();
     }
 
     private void OnDurationChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -1057,6 +1293,7 @@ public partial class MainWindow : Window
         {
             ImgA.Source = null;
             ImgB.Source = null;
+            UpdateCaptionOverlay();
             PreviewHint.Visibility = Visibility.Visible;
             PreviewBadge.Visibility = Visibility.Collapsed;
             FaceBox.Visibility = Visibility.Collapsed;
@@ -1093,6 +1330,12 @@ public partial class MainWindow : Window
             : $"{idx + 1}/{clips.Count} · {cur.FileName}" + (cur.Kind == MediaKind.Video ? " · 视频" : "");
 
         UpdateFaceBox(cur);
+
+        // 字幕预览：转场期前后两个片段的字幕一起按各自局部时间显示
+        if (inTransition)
+            UpdateCaptionOverlay((cur, local), (clips[idx - 1], clips[idx - 1].Duration - td + local));
+        else
+            UpdateCaptionOverlay((cur, local));
     }
 
     private void ResetLayerEffects()

@@ -368,6 +368,19 @@ public sealed class TimelineControl : FrameworkElement
             DrawText(dc, info, new Point(x + 5, ClipTop + ClipHeight - 16), 9.5,
                 Color.FromArgb(190, 232, 163, 61), dpi, Math.Max(20, cw - 12));
 
+            // 字幕区间条：画在片段序号下方（青蓝色，区别于转场标记的橙色）
+            foreach (var cap in clip.Captions)
+            {
+                if (!cap.IsValid) continue;
+                var s = Math.Clamp(cap.Start, 0, clip.Duration);
+                var e = Math.Clamp(cap.End, 0, clip.Duration);
+                if (e <= s) continue;
+                var bx = x + s * _pps;
+                var bw = Math.Max(3, (e - s) * _pps);
+                var capRect = new Rect(bx, ClipTop + 15, Math.Min(bw, x + cw - bx), 3);
+                dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(0x5F, 0xB8, 0xE8)), null, capRect, 1.5, 1.5);
+            }
+
             // 转场：在重叠区域画出标记
             if (i > 0)
             {

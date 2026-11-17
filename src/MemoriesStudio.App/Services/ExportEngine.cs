@@ -47,13 +47,61 @@ public sealed class ExportEngine
 {
     private static string F(double v) => v.ToString("0.####", CultureInfo.InvariantCulture);
 
-    public sealed record Plan(List<string> Args, string FilterScript, double TotalDuration, string Preview);
+    public sealed record Plan(List<string> Args, string FilterScript, double TotalDuration, string Preview,
+        List<string>? CaptionFiles = null);
 
     /// <summary>单块最多片段数：内存有界（每片段的滤镜队列约 15MB），且命令行/滤镜图规模可控。</summary>
     private const int ChunkMaxClips = 60;
 
     /// <summary>导出前素材体检发现的损坏图片（本次导出已用灰帧替代），供 UI 提示。</summary>
     public List<string> LastSwappedFiles { get; } = new();
+
+    /// <summary>字幕 drawtext 用的字体（微软雅黑粗体优先，Windows 自带；缺失时退而求其次）。</summary>
+    private static readonly string? CaptionFontPath = new[]
+    {
+        @"C:\Windows\Fonts\msyhbd.ttc",
+        @"C:\Windows\Fonts\msyh.ttc",
+        @"C:\Windows\Fonts\simhei.ttf",
+        @"C:\Windows\Fonts\arial.ttf",
+    }.FirstOrDefault(File.Exists);
+
+    /// <summary>
+    /// 生成一个字幕段的 drawtext 滤镜。文字写入 UTF-8 textfile 临时文件，
+    /// 彻底绕开 drawtext 的转义地狱（冒号/引号/百分号/中文）；
+    /// 时间用片段局部秒（片段滤镜图的 t 从 0 计），enable 控制区间、alpha 做淡入淡出。
+    /// </summary>
+    private string BuildDrawText(Caption cap, int H, List<string> textFiles)
+    {
+        var textFile = Path.Combine(Path.GetTempPath(), "ms_cap_" + Guid.NewGuid().ToString("N")[..8] + ".txt");
+        File.WriteAllText(textFile, cap.Text.Replace("\r\n", "\n"), new UTF8Encoding(false));
+        textFiles.Add(textFile);
+
+        var fontPx = Math.Max(14, (int)Math.Round(H * cap.FontSizePct / 100.0));
+        var (fill, border) = Caption.Colors(cap.ColorPreset);
+        var margin = (int)Math.Round(H * Caption.EdgeMarginPct / 100.0);
+        var yExpr = cap.Position == CaptionPos.Top ? $"y={margin}" : $"y=h-th-{margin}";
+        var fade = cap.Fade > 0.001
+            ? $":alpha='if(lt(t,{F(cap.Start + cap.Fade)}),min((t-{F(cap.Start)})/{F(cap.Fade)},1)," +
+              $"if(gt(t,{F(cap.End - cap.Fade)}),min(({F(cap.End)}-t)/{F(cap.Fade)},1),1))'"
+            : "";
+        var borderW = Math.Max(2, fontPx / 16);
+        // Windows 盘符里的冒号是 filter 参数分隔符，单引号保护不了它，必须转义成 C\:；
+        // expansion=none 关闭 %{...} 文本展开——孤立 % 会让展开失败、drawtext 静默不画字
+        var font = CaptionFontPath!.Replace('\\', '/').Replace(":", "\\:");
+        var tf = textFile.Replace('\\', '/').Replace(":", "\\:");
+
+        return $"drawtext=fontfile='{font}':textfile='{tf}':expansion=none" +
+               $":fontsize={fontPx}:fontcolor={fill}:borderw={borderW}:bordercolor={border}" +
+               $":x=(w-text_w)/2:{yExpr}:enable='between(t,{F(cap.Start)},{F(cap.End)})'{fade},";
+    }
+
+    /// <summary>某片段全部有效字幕的 drawtext 链（无字幕返回空串）。</summary>
+    private string CaptionFilters(Clip c, int H, List<string> textFiles)
+    {
+        if (CaptionFontPath is null) return "";
+        var caps = c.Captions.Where(x => x.IsValid).ToList();
+        return caps.Count == 0 ? "" : string.Concat(caps.Select(cap => BuildDrawText(cap, H, textFiles)));
+    }
 
     private readonly List<(Clip Clip, string Path)> _pendingRestore = new();
 
@@ -293,6 +341,9 @@ public sealed class ExportEngine
         finally
         {
             try { File.Delete(scriptPath); } catch { }
+            if (plan.CaptionFiles is not null)
+                foreach (var f in plan.CaptionFiles)
+                    try { File.Delete(f); } catch { }
         }
 
         if (proc.ExitCode != 0)
@@ -678,6 +729,7 @@ public sealed class ExportEngine
         var ss = W <= 2560 ? 2.0 : 1.5;           // 运镜的超采样倍率，抵消裁剪的整数取整抖动
         var sw = (int)(W * ss / 2) * 2;
         var sh = (int)(H * ss / 2) * 2;
+        var captionFiles = new List<string>();    // drawtext 的 textfile 临时文件（渲染后清理）
 
         // 照片输入只有 1 帧：缩放/裁切后就交给 zoompan，由 d=frames 铺成整段
 
@@ -692,9 +744,14 @@ public sealed class ExportEngine
                 fc.Append($"[{videoInput[i]}:v]fps={fps},")
                   .Append($"tpad=stop_mode=clone:stop_duration=5,trim=duration={F(dur[i])},")
                   .Append($"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,")
-                  .Append($"crop={W}:{H},setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v{i}];\n");
+                  .Append($"crop={W}:{H},setsar=1,")
+                  .Append(CaptionFilters(c, H, captionFiles))
+                  .Append($"format=yuv420p,setpts=PTS-STARTPTS[v{i}];\n");
                 continue;
             }
+
+            // 字幕 drawtext 链（空串表示该片段无字幕）
+            var capFx = CaptionFilters(c, H, captionFiles);
 
             // 照片输入只有 1 帧：缩放/裁切后交给 zoompan，由 d=frames 铺满整段
             var photoPrefix = $"[{photoInput[i]}:v]";
@@ -739,7 +796,9 @@ public sealed class ExportEngine
                   // 注意不要在 zoompan 之后再挂 fps= 滤镜：zoompan 已输出规整的 fps 时间戳，
                   // 再过一遍 fps 会把末尾一帧吞掉（实测 120 帧变 119）。
                   .Append($"scale={W}:{H}:flags=lanczos,")
-                  .Append($"setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v{i}];\n");
+                  .Append($"setsar=1,")
+                  .Append(capFx)
+                  .Append($"format=yuv420p,setpts=PTS-STARTPTS[v{i}];\n");
                 continue;
             }
 
@@ -771,7 +830,9 @@ public sealed class ExportEngine
               .Append($"zoompan=z='{z}':x='{x}':y='{y}':d={(isOffsetClip ? firstFramesOrig : frames[i])}:s={sw}x{sh}:fps={fps},")
               .Append(firstTrim)
               .Append($"scale={W}:{H}:flags=lanczos,")
-              .Append($"setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v{i}];\n");
+              .Append($"setsar=1,")
+              .Append(capFx)
+              .Append($"format=yuv420p,setpts=PTS-STARTPTS[v{i}];\n");
         }
 
         // ---- 4. 转场 / 拼接 ----
@@ -900,7 +961,7 @@ public sealed class ExportEngine
         args.Add(outputPath);
 
         var preview = "ffmpeg " + string.Join(" ", args.Take(12)) + " ... " + outputPath;
-        return new Plan(args, fc.ToString(), outDuration ?? total, preview);
+        return new Plan(args, fc.ToString(), outDuration ?? total, preview, captionFiles);
     }
 
     /// <summary>

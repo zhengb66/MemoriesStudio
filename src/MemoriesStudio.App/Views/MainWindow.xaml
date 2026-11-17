@@ -171,6 +171,78 @@
                             <Slider x:Name="SldTransition" Style="{StaticResource FlatSlider}" Minimum="0.2" Maximum="4"
                                     SmallChange="0.1" ValueChanged="OnTransitionDurationChanged" Margin="0,0,0,12"/>
 
+                            <!-- 字幕：与片段绑定，导出时烧录进画面（图片单段 / 视频多段） -->
+                            <StackPanel x:Name="CaptionPanel" Margin="0,0,0,12">
+                                <Grid Margin="0,0,0,6">
+                                    <TextBlock Text="字幕" Style="{StaticResource FieldLabel}"/>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                        <Button x:Name="BtnCaptionAdd" Content="＋ 添加字幕" Style="{StaticResource Btn}"
+                                                Padding="6,1" FontSize="10.5" Click="OnCaptionAdd"
+                                                ToolTip="添加一段字幕（视频片段可加多段）"/>
+                                        <Button x:Name="BtnCaptionDel" Content="删除" Style="{StaticResource Btn}"
+                                                Padding="6,1" FontSize="10.5" Margin="4,0,0,0"
+                                                Click="OnCaptionDelete" Visibility="Collapsed"
+                                                ToolTip="删除当前编辑的这段字幕"/>
+                                    </StackPanel>
+                                </Grid>
+
+                                <ListBox x:Name="LstCaptions" Height="72" Margin="0,0,0,6"
+                                         Background="#14151A" BorderBrush="{StaticResource BorderBrush}"
+                                         BorderThickness="1" FontSize="10.5" Padding="2"
+                                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                         SelectionChanged="OnCaptionSelected">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Margin="2,3,0,3" TextTrimming="CharacterEllipsis">
+                                                <Run Text="{Binding RangeText, Mode=OneWay}" Foreground="#E8A33D"/>
+                                                <Run Text=" "/>
+                                                <Run Text="{Binding Text, Mode=OneWay}" Foreground="#D6D9E0"/>
+                                            </TextBlock>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+
+                                <StackPanel x:Name="CaptionEditor" Visibility="Collapsed">
+                                    <TextBox x:Name="TxtCaption" AcceptsReturn="True" TextWrapping="Wrap" Height="52"
+                                             VerticalScrollBarVisibility="Auto" FontSize="11.5"
+                                             Background="#14151A" Foreground="{StaticResource TextBrush}"
+                                             BorderBrush="{StaticResource BorderBrush}" Padding="6,4"
+                                             TextChanged="OnCaptionTextChanged" Margin="0,0,0,8"/>
+                                    <Grid Margin="0,0,0,2">
+                                        <TextBlock Text="字号" Style="{StaticResource FieldLabel}"/>
+                                        <TextBlock x:Name="TxtCaptionFont" Text="4%" HorizontalAlignment="Right"
+                                                   Foreground="{StaticResource AccentBrush}" FontSize="11"/>
+                                    </Grid>
+                                    <Slider x:Name="SldCaptionFont" Style="{StaticResource FlatSlider}" Minimum="2" Maximum="12"
+                                            SmallChange="0.2" ValueChanged="OnCaptionFontChanged" Margin="0,0,0,8"/>
+                                    <Grid Margin="0,0,0,8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="8"/>
+                                            <ColumnDefinition Width="108"/>
+                                        </Grid.ColumnDefinitions>
+                                        <ComboBox x:Name="CmbCaptionColor" Grid.Column="0" Style="{StaticResource Combo}"
+                                                  SelectionChanged="OnCaptionStyleChanged"/>
+                                        <ComboBox x:Name="CmbCaptionPos" Grid.Column="2" Style="{StaticResource Combo}"
+                                                  SelectionChanged="OnCaptionStyleChanged"/>
+                                    </Grid>
+                                    <Grid Margin="0,0,0,2">
+                                        <TextBlock Text="出现" Style="{StaticResource FieldLabel}"/>
+                                        <TextBlock x:Name="TxtCaptionStart" Text="0.0s" HorizontalAlignment="Right"
+                                                   Foreground="{StaticResource AccentBrush}" FontSize="11"/>
+                                    </Grid>
+                                    <Slider x:Name="SldCaptionStart" Style="{StaticResource FlatSlider}" Minimum="0" Maximum="4"
+                                            SmallChange="0.1" ValueChanged="OnCaptionStartChanged" Margin="0,0,0,6"/>
+                                    <Grid Margin="0,0,0,2">
+                                        <TextBlock Text="消失" Style="{StaticResource FieldLabel}"/>
+                                        <TextBlock x:Name="TxtCaptionEnd" Text="4.0s" HorizontalAlignment="Right"
+                                                   Foreground="{StaticResource AccentBrush}" FontSize="11"/>
+                                    </Grid>
+                                    <Slider x:Name="SldCaptionEnd" Style="{StaticResource FlatSlider}" Minimum="0" Maximum="4"
+                                            SmallChange="0.1" ValueChanged="OnCaptionEndChanged"/>
+                                </StackPanel>
+                            </StackPanel>
+
                             <Grid Margin="0,0,0,6">
                                 <TextBlock Text="取景" Style="{StaticResource FieldLabel}"/>
                                 <TextBlock x:Name="TxtFaceStatus" Text="" HorizontalAlignment="Right"
