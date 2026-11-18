@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using LibVLCSharp.Shared;
 using MemoriesStudio.Models;
@@ -33,6 +34,136 @@ public static class MediaProbe
 
     public static bool IsImage(string path) => ImageExts.Contains(Path.GetExtension(path));
 
+    // ---------------------------------------------------------------- EXIF 方向
+
+    /// <summary>
+    /// 读取图片 EXIF Orientation（1~8；读不到按 1）。必须读 MediaSource.Resolve 后的路径：
+    /// HEIC 会先转成 JPG，方向已经烘进像素，不能再按原始 HEIC 的元数据旋转一次。
+    /// </summary>
+    public static int GetOrientation(string path)
+    {
+        string resolved;
+        try { resolved = MediaSource.Resolve(path); }
+        catch { return 1; }
+
+        var o = ReadJpegOrientation(resolved);
+        if (o != 1) return o;
+        return ReadMetadataOrientation(resolved);
+    }
+
+    /// <summary>按 EXIF 方向把解码后的位图转成"人眼看到的方向"。</summary>
+    public static BitmapSource ApplyOrientation(BitmapSource src, int orientation)
+    {
+        BitmapSource Rotate(double deg)
+        {
+            var r = new TransformedBitmap(src,
+                new RotateTransform(deg, src.PixelWidth / 2.0, src.PixelHeight / 2.0));
+            r.Freeze();
+            return r;
+        }
+
+        BitmapSource Flip(BitmapSource s, double sx, double sy)
+        {
+            var f = new TransformedBitmap(s,
+                new ScaleTransform(sx, sy, s.PixelWidth / 2.0, s.PixelHeight / 2.0));
+            f.Freeze();
+            return f;
+        }
+
+        switch (orientation)
+        {
+            case 2: return Flip(src, -1, 1);          // 水平镜像
+            case 3: return Rotate(180);               // 倒置
+            case 4: return Flip(src, 1, -1);          // 垂直镜像
+            case 5: return Flip(Rotate(90), -1, 1);   // 转置（沿主对角线翻转）
+            case 6: return Rotate(90);                // 手机竖拍最常见：顺时针 90°
+            case 7: return Flip(Rotate(90), 1, -1);   // 副对角线翻转
+            case 8: return Rotate(-90);               // 逆时针 90°
+            default: return src;
+        }
+    }
+
+    private static int ReadJpegOrientation(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var buf = new byte[256 * 1024];
+            var n = fs.Read(buf, 0, buf.Length);
+            if (n < 16 || buf[0] != 0xFF || buf[1] != 0xD8) return 1;
+
+            var i = 2;
+            while (i + 4 <= n)
+            {
+                if (buf[i] != 0xFF) { i++; continue; }
+                var marker = buf[i + 1];
+                if (marker is 0xD9 or 0xDA) break;
+                if (marker == 0xD8 || marker == 0x01 || marker is >= 0xD0 and <= 0xD7)
+                {
+                    i += 2;
+                    continue;
+                }
+                var len = (buf[i + 2] << 8) | buf[i + 3];
+                if (len < 2 || i + 2 + len > n) break;
+                if (marker == 0xE1 && len >= 10 && i + 10 <= n &&
+                    buf[i + 4] == 'E' && buf[i + 5] == 'x' && buf[i + 6] == 'i' &&
+                    buf[i + 7] == 'f' && buf[i + 8] == 0 && buf[i + 9] == 0)
+                    return ReadTiffOrientation(buf, i + 10, n);
+                i += 2 + len;
+            }
+        }
+        catch { }
+        return 1;
+    }
+
+    private static int ReadTiffOrientation(byte[] b, int t, int n)
+    {
+        if (t + 8 > n) return 1;
+        var le = b[t] == 'I' && b[t + 1] == 'I';
+        if (!le && !(b[t] == 'M' && b[t + 1] == 'M')) return 1;
+
+        ushort U16(int p) => le
+            ? (ushort)(b[p] | (b[p + 1] << 8))
+            : (ushort)((b[p] << 8) | b[p + 1]);
+        uint U32(int p) => le
+            ? (uint)(b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24))
+            : (uint)((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]);
+
+        if (U16(t + 2) != 0x2A) return 1;
+        var ifd = t + (int)U32(t + 4);
+        if (ifd < 0 || ifd + 2 > n) return 1;
+        var count = U16(ifd);
+        for (var k = 0; k < count; k++)
+        {
+            var e = ifd + 2 + k * 12;
+            if (e + 12 > n) break;
+            var tag = U16(e);
+            var type = U16(e + 2);
+            var num = U32(e + 4);
+            if (tag == 0x0112 && type == 3 && num >= 1)
+            {
+                var v = U16(e + 8);
+                return v is >= 1 and <= 8 ? v : 1;
+            }
+        }
+        return 1;
+    }
+
+    private static int ReadMetadataOrientation(string path)
+    {
+        try
+        {
+            var dec = BitmapDecoder.Create(new Uri(path),
+                BitmapCreateOptions.DelayCreation, BitmapCacheOption.OnDemand);
+            var md = dec.Frames.FirstOrDefault()?.Metadata as BitmapMetadata;
+            var q = md?.GetQuery("/app1/ifd/{ushort=274}");
+            if (q is ushort u && u is >= 1 and <= 8) return u;
+            if (q is int v && v is >= 1 and <= 8) return v;
+        }
+        catch { }
+        return 1;
+    }
+
     // ---------------------------------------------------------------- 探测
 
     public static async Task<ProbeResult?> ProbeAsync(string path, CancellationToken ct = default)
@@ -52,7 +183,14 @@ public static class MediaProbe
                 new Uri(rp), BitmapCreateOptions.DelayCreation, BitmapCacheOption.OnDemand);
             var f = bmp.Frames.FirstOrDefault();
             if (f is null) return null;
-            return new ProbeResult(f.PixelWidth, f.PixelHeight, 0, 0, false, "image", 0);
+            // BitmapDecoder 给的是原始像素尺寸（4000x3000），手机竖拍照片靠 EXIF=6 旋转后
+            // 才显示为竖幅；这里交换成显示尺寸，运镜/取景/画布比例才与预览一致。
+            var w = f.PixelWidth;
+            var h = f.PixelHeight;
+            var o = GetOrientation(path);
+            if (o is 5 or 6 or 7 or 8) (w, h) = (h, w);
+            return new ProbeResult(w, h, 0, 0, false, "image",
+                o switch { 6 => 90, 8 => 270, 3 => 180, _ => 0 });
         }
         catch
         {

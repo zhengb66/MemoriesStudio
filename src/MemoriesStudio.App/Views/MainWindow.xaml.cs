@@ -1747,19 +1747,27 @@ public partial class MainWindow : Window
             bi.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
             bi.EndInit();
             bi.Freeze();
+
+            // WPF 的 BitmapImage 不按 EXIF Orientation 自动旋转；手机竖拍照片在这里把
+            // 4000x3000 的原始像素转成 3000x4000 的显示方向，否则时间轴上人物横躺。
+            BitmapSource bmp = bi;
+            var orientation = MediaProbe.GetOrientation(path);
+            if (orientation != 1) bmp = MediaProbe.ApplyOrientation(bmp, orientation);
+            bmp.Freeze();
+
             // 常见坑：JPG 常带 72dpi 元数据，DIP 尺寸≠像素尺寸，会让 Image 的拉伸/裁切计算错乱。
             // 统一重铸为 96dpi（DIP=像素），后续几何全部按像素计算。
-            if (Math.Abs(bi.DpiX - 96) > 0.1 || Math.Abs(bi.DpiY - 96) > 0.1)
+            if (Math.Abs(bmp.DpiX - 96) > 0.1 || Math.Abs(bmp.DpiY - 96) > 0.1)
             {
-                var stride = (bi.PixelWidth * bi.Format.BitsPerPixel + 7) / 8;
-                var buf = new byte[stride * bi.PixelHeight];
-                bi.CopyPixels(buf, stride, 0);
-                var normalized = BitmapSource.Create(bi.PixelWidth, bi.PixelHeight, 96, 96,
-                    bi.Format, null, buf, stride);
+                var stride = (bmp.PixelWidth * bmp.Format.BitsPerPixel + 7) / 8;
+                var buf = new byte[stride * bmp.PixelHeight];
+                bmp.CopyPixels(buf, stride, 0);
+                var normalized = BitmapSource.Create(bmp.PixelWidth, bmp.PixelHeight, 96, 96,
+                    bmp.Format, null, buf, stride);
                 normalized.Freeze();
                 return normalized;
             }
-            return bi;
+            return bmp;
         }
         catch
         {
@@ -2242,6 +2250,7 @@ public partial class MainWindow : Window
     {
         await RebuildAssetsFromProjectAsync();
         await NormalizeVideoClipsAsync();
+        await NormalizeImageOrientationAsync();
 
         // 动图片段的截帧缓存可能被清理（或换了机器）：用原始视频重新截一帧。
         // 截帧是同步 ffmpeg 调用，放后台；属性回填必须回 UI 线程（绑定更新）。
@@ -2336,6 +2345,47 @@ public partial class MainWindow : Window
             if (fixedCount > 0)
                 SetStatus($"已把 {fixedCount} 个视频片段的时长恢复为素材实际长度（旧工程默认 4 秒已修正）");
         });
+    }
+
+    /// <summary>
+    /// 旧工程兼容：手机竖拍照片在修复前按 EXIF 元数据里的原始像素尺寸（横幅）保存，
+    /// 预览/人脸却按旋转后的竖幅处理，运镜被算成横幅。这里只补正有旋转标记的图片，
+    /// 且只读文件头+元数据，不做整图解码，不影响打开工程速度。
+    /// </summary>
+    private async Task NormalizeImageOrientationAsync()
+    {
+        var rotated = _project.Clips
+            .Where(c => c.Kind == MediaKind.Image && File.Exists(c.SourcePath))
+            .GroupBy(c => c.SourcePath, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .Where(c => MediaProbe.GetOrientation(c.SourcePath) is 5 or 6 or 7 or 8)
+            .ToList();
+        if (rotated.Count == 0) return;
+
+        var fixedCount = 0;
+        foreach (var sample in rotated)
+        {
+            var probe = await MediaProbe.ProbeAsync(sample.SourcePath);
+            if (probe is null) continue;
+            await Dispatcher.InvokeAsync(() =>
+            {
+                foreach (var c in _project.Clips.Where(
+                             x => string.Equals(x.SourcePath, sample.SourcePath, StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (c.SourceWidth == probe.Width && c.SourceHeight == probe.Height) continue;
+                    c.SourceWidth = probe.Width;
+                    c.SourceHeight = probe.Height;
+                    // 自动运镜当初按错误的横幅尺寸算过，标记重算；手动设定的运镜保持不动。
+                    if (c.Motion == MotionStyle.Auto) c.MotionV = 0;
+                    fixedCount++;
+                }
+            });
+        }
+        if (fixedCount > 0)
+        {
+            Timeline.Refresh();
+            RenderFrame();
+        }
     }
 
     private static bool IsLegacyDefaultDuration(Clip c)

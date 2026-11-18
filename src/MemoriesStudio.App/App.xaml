@@ -305,7 +305,7 @@
                                 </Grid.ColumnDefinitions>
                                 <Border Width="66" Height="42" CornerRadius="3" Background="#0C0D10" ClipToBounds="True">
                                     <Grid>
-                                        <Image Source="{Binding ThumbnailPath}" Stretch="UniformToFill"/>
+                                        <Image Source="{Binding ThumbnailPath}" Stretch="Uniform"/>
                                         <Border VerticalAlignment="Bottom" HorizontalAlignment="Right" Margin="3"
                                                 Background="#B0000000" CornerRadius="2" Padding="3,0"
                                                 Visibility="{Binding IsVideo, Converter={StaticResource BoolToVis}}">
