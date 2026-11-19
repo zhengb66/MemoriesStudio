@@ -178,6 +178,36 @@ public partial class App : Application
             return;
         }
 
+        // 撤销/重做 + Ctrl+S 自检：MemoriesStudio.exe --undo-test <图1> <图2> <输出png>
+        if (e.Args.Length >= 4 && e.Args[0] == "--undo-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var uw = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = uw;
+            uw.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    info = await uw.UndoRedoForTest(e.Args[1], e.Args[2], e.Args[3]);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_undo.log"),
+                        $"RESULT={(info.Contains("FAIL") || info.StartsWith("ERROR") ? "FAIL" : "OK")}\r\n" +
+                        info + $"\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
         // 导入取消选中 + 属性页分组自检：MemoriesStudio.exe --import-sel-test <素材路径> <输出png>
         if (e.Args.Length >= 3 && e.Args[0] == "--import-sel-test")
         {
@@ -265,8 +295,8 @@ public partial class App : Application
             return;
         }
 
-        // 方向键尾帧定位自检：MemoriesStudio.exe --nav-tail-test <工程> <目标片段序号1起> <输出png>
-        // 目标需带前驱转场；验证 → 导航后播放头停在本片段独占区尾帧、预览不显示上一段
+        // 方向键中间帧定位自检：MemoriesStudio.exe --nav-tail-test <工程> <目标片段序号1起> <输出png>
+        // 目标需带前驱转场；验证 → 导航后播放头停在本片段独占区中间帧、预览不显示上一段
         if (e.Args.Length >= 4 && e.Args[0] == "--nav-tail-test")
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;

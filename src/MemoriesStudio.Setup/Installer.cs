@@ -10,7 +10,7 @@ namespace MemoriesStudio.Setup;
 internal static class AppInfo
 {
     public const string DisplayName = "Memories Studio";
-    public const string DisplayVersion = "0.7.0";
+    public const string DisplayVersion = "0.7.1";
     public const string Publisher = "Memories Studio";
     public const string ExeName = "MemoriesStudio.exe";
     public const string UninstallName = "uninstall.exe";

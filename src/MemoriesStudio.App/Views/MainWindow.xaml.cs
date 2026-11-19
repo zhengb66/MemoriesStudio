@@ -49,6 +49,16 @@ public partial class MainWindow : Window
     private readonly VideoGrabber _grabber = new();   // 暂停/拖动进度时的单帧快速抓取
     private readonly WriteableBitmap?[] _videoBitmaps = new WriteableBitmap?[2];
 
+    // 撤销/重做：只对「素材库增删、时间轴增删移动」记录快照，最多 10 步。
+    // 快照保存的是对象引用而非深拷贝：撤销后再重做，人脸检测/字幕等后续结果不会丢。
+    private sealed record UndoSnapshot(
+        IReadOnlyList<MediaAsset> Assets, IReadOnlyList<Clip> Clips, Clip? Selected);
+
+    private readonly List<UndoSnapshot> _undoStack = new();
+    private readonly List<UndoSnapshot> _redoStack = new();
+    private const int MaxUndoSteps = 10;
+    private bool _suppressUndo;   // 恢复快照时不再记录新快照
+
     private Clip? _selected;
     private string? _projectPath;
     private bool _suppressUi;
@@ -98,6 +108,7 @@ public partial class MainWindow : Window
         Timeline.SeekRequested += OnTimelineSeek;
         Timeline.ThumbnailProvider = GetThumbnailForTimeline;
         Timeline.AssetsDropped += OnTimelineAssetsDropped;
+        Timeline.ClipsReordering += (_, _) => PushUndo();
         Timeline.ClipsReordered += OnTimelineClipsReordered;
 
         AttachProjectEvents(_project);
@@ -199,7 +210,7 @@ public partial class MainWindow : Window
 
     /// <param name="healthCheck">手动导入为 true：后台 6 路并行给新图片做完整解码体检（不阻塞界面）；
     /// 打开工程重建素材库传 false——体检在打开路径上太慢（1280+ 张图要数分钟），缓存结论随后续操作按需命中。</param>
-    private async Task ImportFilesAsync(IEnumerable<string> paths, bool healthCheck = true)
+    private async Task ImportFilesAsync(IEnumerable<string> paths, bool healthCheck = true, bool undoable = true)
     {
         var all = ExpandPaths(paths).ToList();
         var audioCount = all.Count(f => AudioExts.Contains(Path.GetExtension(f).ToLowerInvariant()));
@@ -224,6 +235,7 @@ public partial class MainWindow : Window
                 continue;
             }
 
+            if (added == 0 && undoable) PushUndo();   // 第一批真正加入前记录（全跳过则不记）
             _assets.Add(new MediaAsset { Path = f, Kind = kind.Value });
             added++;
         }
@@ -419,6 +431,7 @@ public partial class MainWindow : Window
         var count = 0;
         Clip? lastAdded = null;
         var pendingFace = new List<Clip>();   // 本次新加的图片片段，统一跑人脸识别（带进度）
+        var undoPushed = false;
 
         // 插入位置：拖放落点 > 播放头位置 > 末尾
         var insertAt = atTime.HasValue
@@ -429,6 +442,8 @@ public partial class MainWindow : Window
         {
             // 视频 = 实际时长（用户可通过节选区间裁剪）；图片 = 4 秒；音乐不进时间轴
             if (a.Kind == MediaKind.Audio) continue;
+
+            if (!undoPushed) { PushUndo(); undoPushed = true; }
 
             // 动图（小于 2 秒的视频）：在时长 1/2 处截一帧，按图片入轨。
             // 这类片段本身就是"会动的照片"，按视频入轨只有一两秒、转场都放不下，
@@ -1304,6 +1319,7 @@ public partial class MainWindow : Window
         var idx = _project.Clips.IndexOf(_selected);
         var target = idx + delta;
         if (idx < 0 || target < 0 || target >= _project.Clips.Count) return;
+        PushUndo();
         MarkDirty();
         _project.Clips.Move(idx, target);
         Timeline.SetClipSelection(new[] { _selected }, _selected);
@@ -1324,6 +1340,7 @@ public partial class MainWindow : Window
     private void RemoveClips(IReadOnlyList<Clip> clips)
     {
         if (clips.Count == 0) return;
+        PushUndo();
 
         var label = clips.Count == 1 ? clips[0].FileName : $"{clips.Count} 个片段";
         MarkDirty();
@@ -2163,6 +2180,7 @@ public partial class MainWindow : Window
 
         _project = new ProjectFile();
         AttachProjectEvents(_project);
+        ClearUndoHistory();          // 撤销栈不跨工程
         _selected = null;
         _projectPath = null;
         _time = 0;
@@ -2212,6 +2230,7 @@ public partial class MainWindow : Window
 
         _project = loaded;
         AttachProjectEvents(_project, path);
+        ClearUndoHistory();          // 撤销栈不跨工程
         _selected = null;
         _projectPath = path;
         _time = 0;
@@ -2239,7 +2258,7 @@ public partial class MainWindow : Window
         paths = paths.Where(p => !string.IsNullOrEmpty(p)).Distinct().ToList();
         if (paths.Count == 0) return;
 
-        await ImportFilesAsync(paths, healthCheck: false);
+        await ImportFilesAsync(paths, healthCheck: false, undoable: false);   // 打开工程重建素材库不算用户操作
         var missing = paths.Count(p => !File.Exists(p));
         if (missing > 0)
             SetStatus($"工程已打开，但有 {missing} 个素材文件不在原位置（已移动或删除），预览与导出会跳过它们。");
@@ -2405,6 +2424,87 @@ public partial class MainWindow : Window
 
     private void OnSaveProject(object sender, RoutedEventArgs e) => SaveProject();
 
+    private void OnSaveCommand(object sender, ExecutedRoutedEventArgs e) => SaveProject();
+
+    // ==================================================================== 撤销 / 重做
+
+    private UndoSnapshot CaptureUndo() => new(_assets.ToList(), _project.Clips.ToList(), _selected);
+
+    /// <summary>操作前记录一次快照。只由素材库增删/时间轴增删移动调用。</summary>
+    private void PushUndo()
+    {
+        if (_suppressUndo) return;
+        _undoStack.Add(CaptureUndo());
+        if (_undoStack.Count > MaxUndoSteps) _undoStack.RemoveAt(0);
+        _redoStack.Clear();
+        UpdateUndoButtons();
+    }
+
+    private void UpdateUndoButtons()
+    {
+        BtnUndo.IsEnabled = _undoStack.Count > 0;
+        BtnRedo.IsEnabled = _redoStack.Count > 0;
+        BtnUndo.ToolTip = $"撤销（还可撤销 {_undoStack.Count}/{MaxUndoSteps} 步）";
+        BtnRedo.ToolTip = $"重做（可重做 {_redoStack.Count} 步）";
+    }
+
+    private void ClearUndoHistory()
+    {
+        _undoStack.Clear();
+        _redoStack.Clear();
+        UpdateUndoButtons();
+    }
+
+    private void ApplyUndo(UndoSnapshot s)
+    {
+        _suppressUndo = true;
+        try
+        {
+            if (_playing) PausePlayback();
+            _assets.Clear();
+            foreach (var a in s.Assets) _assets.Add(a);
+            _project.Clips.Clear();
+            foreach (var c in s.Clips) _project.Clips.Add(c);
+
+            _selected = s.Selected is not null && _project.Clips.Contains(s.Selected) ? s.Selected : null;
+            Timeline.SetClipSelection(_selected is null ? Array.Empty<Clip>() : new[] { _selected }, _selected);
+            AssetsList.SelectedItems.Clear();
+            AssetsList.SelectedItem = null;
+
+            RefreshAfterTimelineEdit();
+            RefreshInspector();
+            InvalidateVideoSeek();
+            RenderFrame();
+            MarkDirty();
+        }
+        finally
+        {
+            _suppressUndo = false;
+        }
+        UpdateUndoButtons();
+    }
+
+    private void OnUndo(object sender, RoutedEventArgs e)
+    {
+        if (_undoStack.Count == 0) return;
+        _redoStack.Add(CaptureUndo());
+        var snap = _undoStack[^1];
+        _undoStack.RemoveAt(_undoStack.Count - 1);
+        ApplyUndo(snap);
+        SetStatus($"已撤销（还可撤销 {_undoStack.Count}/{MaxUndoSteps} 步）");
+    }
+
+    private void OnRedo(object sender, RoutedEventArgs e)
+    {
+        if (_redoStack.Count == 0) return;
+        _undoStack.Add(CaptureUndo());
+        if (_undoStack.Count > MaxUndoSteps) _undoStack.RemoveAt(0);
+        var snap = _redoStack[^1];
+        _redoStack.RemoveAt(_redoStack.Count - 1);
+        ApplyUndo(snap);
+        SetStatus($"已重做（还可重做 {_redoStack.Count} 步）");
+    }
+
     /// <summary>保存工程。返回是否保存成功（用户取消另存对话框或保存失败返回 false）。</summary>
     private bool SaveProject()
     {
@@ -2568,6 +2668,7 @@ public partial class MainWindow : Window
 
         _project = loaded;
         AttachProjectEvents(_project, path);
+        ClearUndoHistory();          // 撤销栈不跨工程
         _selected = null;
         _projectPath = path;
         _time = 0;
@@ -2594,6 +2695,97 @@ public partial class MainWindow : Window
 
     /// <summary>自检访问器：当前工程。</summary>
     public Models.ProjectFile? ProjectForTest => _project;
+
+    /// <summary>自检：撤销/重做（素材增删、片段增删移动、10 步上限）与 Ctrl+S 绑定，整窗截图。</summary>
+    public async Task<string> UndoRedoForTest(string img1, string img2, string outPath)
+    {
+        var log = new List<string>();
+        void Check(string name, bool ok, string detail) => log.Add($"{(ok ? "OK" : "FAIL")} {name} {detail}");
+
+        ClearUndoHistory();
+        _assets.Clear();
+        _project.Clips.Clear();
+
+        await ImportFilesAsync(new[] { img1, img2 }, healthCheck: false);
+        Check("import", _assets.Count == 2 && _undoStack.Count == 1,
+            $"assets={_assets.Count} undo={_undoStack.Count}");
+
+        OnUndo(this, new RoutedEventArgs());
+        Check("undo-import", _assets.Count == 0 && _redoStack.Count == 1,
+            $"assets={_assets.Count} redo={_redoStack.Count}");
+        OnRedo(this, new RoutedEventArgs());
+        Check("redo-import", _assets.Count == 2 && _undoStack.Count == 1,
+            $"assets={_assets.Count} undo={_undoStack.Count}");
+
+        var assets = _assets.ToList();
+        AssetsList.SelectedItems.Clear();
+        AssetsList.SelectedItems.Add(assets[1]);
+        DeleteSelectedAssets();
+        Check("delete-asset", _assets.Count == 1 && _undoStack.Count == 2,
+            $"assets={_assets.Count} undo={_undoStack.Count}");
+        OnUndo(this, new RoutedEventArgs());
+        Check("undo-delete-asset", _assets.Count == 2, $"assets={_assets.Count}");
+
+        await AddAssetsToTimelineAsync(assets);
+        var order0 = string.Join("|", _project.Clips.Select(c => c.SourcePath));
+        Check("add-clips", _project.Clips.Count == 2, $"clips={_project.Clips.Count}");
+
+        OnUndo(this, new RoutedEventArgs());
+        Check("undo-add-clips", _project.Clips.Count == 0, $"clips={_project.Clips.Count}");
+        OnRedo(this, new RoutedEventArgs());
+        Check("redo-add-clips", _project.Clips.Count == 2, $"clips={_project.Clips.Count}");
+
+        _selected = _project.Clips[1];
+        Timeline.SetClipSelection(new[] { _selected }, _selected);
+        MoveClip(-1);
+        var order1 = string.Join("|", _project.Clips.Select(c => c.SourcePath));
+        Check("move", order0 != order1, $"changed={order0 != order1}");
+        OnUndo(this, new RoutedEventArgs());
+        Check("undo-move", string.Join("|", _project.Clips.Select(c => c.SourcePath)) == order0,
+            "order-restored");
+
+        RemoveClips(new[] { _project.Clips[0] });
+        Check("delete-clip", _project.Clips.Count == 1, $"clips={_project.Clips.Count}");
+        OnUndo(this, new RoutedEventArgs());
+        Check("undo-delete-clip", _project.Clips.Count == 2, $"clips={_project.Clips.Count}");
+
+        for (var i = 0; i < 13; i++) PushUndo();
+        Check("cap-10", _undoStack.Count == 10, $"undo={_undoStack.Count}");
+        ClearUndoHistory();
+
+        var ctrlS = InputBindings.OfType<KeyBinding>().Any(k =>
+            k.Key == Key.S && k.Modifiers == ModifierKeys.Control &&
+            ReferenceEquals(k.Command, ApplicationCommands.Save));
+        Check("ctrl-s", ctrlS, $"binding={ctrlS}");
+
+        // 走一次真实命令路由，确认 Ctrl+S 绑定的命令确实保存工程
+        _projectPath = Path.Combine(Path.GetTempPath(), "memories_ctrl_s_test.msproj");
+        MarkDirty();
+        ApplicationCommands.Save.Execute(null, this);
+        Check("ctrl-s-save", File.Exists(_projectPath) && !_dirty,
+            $"exists={File.Exists(_projectPath)} clean={!_dirty}");
+
+        UpdateLayout();
+        SaveWindowForTest(outPath);
+        return string.Join("\n", log);
+    }
+
+    private bool SaveWindowForTest(string outPath)
+    {
+        try
+        {
+            var w = (int)Math.Max(2, ActualWidth);
+            var h = (int)Math.Max(2, ActualHeight);
+            var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+            rtb.Render(this);
+            var enc = new PngBitmapEncoder();
+            enc.Frames.Add(BitmapFrame.Create(rtb));
+            using var fs = File.Create(outPath);
+            enc.Save(fs);
+            return true;
+        }
+        catch { return false; }
+    }
 
     /// <summary>
     /// 自检：选中时间轴第 index 个片段（1 起），验证素材库自动跟随定位的效果，
@@ -2657,8 +2849,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 自检：方向键选中带转场的片段后，播放头应停在本片段独占区尾帧，
-    /// Locate 仍判定为本片段且预览不处于转场区（不会显示上一段）。
+    /// 自检：方向键选中带转场的片段后，播放头应停在本片段独占区中间帧
+    /// （入口名沿用历史的 --nav-tail-test），Locate 仍判定为本片段且预览不处于转场区。
     /// </summary>
     public string NavTailForTest(int targetNo, string outPath)
     {
@@ -2676,13 +2868,17 @@ public partial class MainWindow : Window
 
         var end = tgt + 1 < _project.Clips.Count ? starts[tgt + 1] : starts[tgt] + clip.Duration;
         var fps = _project.Fps > 0 ? _project.Fps : 25.0;
-        var expect = Math.Max(0, end - 1.0 / fps);
-        var (locIdx, locLocal) = _project.Locate(_time);
         var td = clip.EffectiveTransition(prev);
+        var lo = Math.Min(end, starts[tgt] + td + 1.0 / fps);
+        var hi = Math.Max(lo, end - 1.0 / fps);
+        var expect = Math.Clamp((starts[tgt] + end) * 0.5, lo, hi);
+        var tail = Math.Max(0, end - 1.0 / fps);
+        var (locIdx, locLocal) = _project.Locate(_time);
         var inTransition = td > 0.001 && locLocal < td - 1e-6;
         var badge = TxtPreviewBadge.Text;
         var selectedOk = ReferenceEquals(Timeline.Selected, clip);
-        var ok = selectedOk && locIdx == tgt && !inTransition && Math.Abs(_time - expect) < 0.02;
+        var midOk = Math.Abs(expect - tail) > 0.02;   // 确实不是尾帧
+        var ok = selectedOk && locIdx == tgt && !inTransition && midOk && Math.Abs(_time - expect) < 0.02;
 
         // 泵一会儿消息，等解码首帧渲染到预览（截图才有画面，而非刚 seek 后的黑屏）
         var frame = new System.Windows.Threading.DispatcherFrame();
@@ -2702,8 +2898,9 @@ public partial class MainWindow : Window
         using (var fs = File.Create(outPath)) enc.Save(fs);
 
         return $"{(ok ? "OK" : "FAIL")} target={tgt + 1} selected={selectedOk} " +
-               $"expect={expect:0.000} time={_time:0.000} locIdx={locIdx + 1} " +
-               $"local={locLocal:0.000} td={td:0.000} inTransition={inTransition} badge={badge}";
+               $"expect={expect:0.000} time={_time:0.000} tail={tail:0.000} midOk={midOk} " +
+               $"locIdx={locIdx + 1} local={locLocal:0.000} td={td:0.000} " +
+               $"inTransition={inTransition} badge={badge}";
     }
 
     /// <summary>
@@ -3244,6 +3441,7 @@ public partial class MainWindow : Window
 
         var inUse = new List<string>();
         var removed = 0;
+        var undoPushed = false;
 
         foreach (var a in selected)
         {
@@ -3255,6 +3453,7 @@ public partial class MainWindow : Window
                 continue;
             }
 
+            if (!undoPushed) { PushUndo(); undoPushed = true; }
             _assets.Remove(a);
             removed++;
         }

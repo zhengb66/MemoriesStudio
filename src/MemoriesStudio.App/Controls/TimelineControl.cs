@@ -117,6 +117,9 @@ public sealed class TimelineControl : FrameworkElement
     /// <summary>素材库拖放到时间轴：参数为 (素材列表, 落点时间)。</summary>
     public event EventHandler<(System.Collections.Generic.IReadOnlyList<MediaAsset> Assets, double Time)>? AssetsDropped;
 
+    /// <summary>片段顺序即将被拖动改变（改动前触发，主窗口据此记录撤销点）。</summary>
+    public event EventHandler? ClipsReordering;
+
     /// <summary>片段顺序被拖动改变（先改 Project.Clips 再触发，主窗口据此刷新）。</summary>
     public event EventHandler? ClipsReordered;
 
@@ -209,13 +212,13 @@ public sealed class TimelineControl : FrameworkElement
 
     /// <summary>
     /// 把选中移到第 index 个片段（0 起，越界自动钳到首尾）：
-    /// 更新选中、把片段滚入视口、播放头跳到片段尾帧并通知预览，
+    /// 更新选中、把片段滚入视口、播放头跳到片段中间帧并通知预览，
     /// 触发 SelectionChanged（属性面板与素材库随之同步）。无片段时返回 -1。
     /// <para>
-    /// 播放头定位在"本片段独占区"的尾帧（后一片段起点 / 整条片尾的前一帧），而不是片段起点。
-    /// 因为带转场的片段其起点正处于与上一段的转场区间（local &lt; 转场时长），
-    /// 预览会按转场逻辑显示上一段素材；停到尾帧才能让预览显示当前选中的这段。
-    /// 用后一片段起点作右界，可保证 Locate 仍判定为本片段、不会落到下一段的转场区。
+    /// 播放头定位在"本片段独占区"的中间，方便直接看到字幕所在的片段中段。
+    /// 独占区左界越过与上一段的转场（local &lt; 转场时长时预览显示上一段），
+    /// 右界取后一片段起点 / 整条片尾，避开下一段的转场区；
+    /// 中间帧被钳在这个区间内，既不在转场区，Locate 也仍判定为本片段。
     /// </para>
     /// </summary>
     public int SelectClipAt(int index)
@@ -236,8 +239,13 @@ public sealed class TimelineControl : FrameworkElement
         // 右界取后一片段起点（含转场重叠时被让出的那一段），末片段则取整条片尾。
         var end = index + 1 < project.Clips.Count ? starts[index + 1] : start + clip.Duration;
         var fps = project.Fps > 0 ? project.Fps : 25.0;
-        var tail = Math.Max(start, end - 1.0 / fps);   // 独占区尾帧，至少不早于本片段起点
-        Playhead = Math.Clamp(tail, 0, project.TotalDuration);
+        // 独占区：左界越过与前一段的转场，右界取后一片段起点（末片段取整条片尾）。
+        var inTransition = index > 0 ? clip.EffectiveTransition(project.Clips[index - 1]) : 0.0;
+        var lo = Math.Min(end, start + inTransition + 1.0 / fps);
+        var hi = Math.Max(lo, end - 1.0 / fps);
+        // 刻度线停在本片段中间帧（方便查看字幕），并钳在独占区内避开首尾转场。
+        var middle = (start + end) * 0.5;
+        Playhead = Math.Clamp(Math.Clamp(middle, lo, hi), 0, project.TotalDuration);
         SeekRequested?.Invoke(this, Playhead);
         SelectionChanged?.Invoke(this, clip);
         return index;
@@ -724,6 +732,7 @@ public sealed class TimelineControl : FrameworkElement
         var origIndex = clips.IndexOf(_dragBlock[0]);
         if (_dropIndex == origIndex) return false;   // 没挪动
 
+        ClipsReordering?.Invoke(this, EventArgs.Empty);
         foreach (var c in _dragBlock) clips.Remove(c);
         for (var i = 0; i < _dragBlock.Count; i++)
             clips.Insert(Math.Min(_dropIndex + i, clips.Count), _dragBlock[i]);

@@ -9,6 +9,12 @@
         Background="{StaticResource BgBrush}"
         AllowDrop="True" DragOver="OnDragOver" Drop="OnDrop"
         KeyDown="OnWindowKeyDown">
+    <Window.InputBindings>
+        <KeyBinding Key="S" Modifiers="Control" Command="{x:Static ApplicationCommands.Save}"/>
+    </Window.InputBindings>
+    <Window.CommandBindings>
+        <CommandBinding Command="{x:Static ApplicationCommands.Save}" Executed="OnSaveCommand"/>
+    </Window.CommandBindings>
 
     <Grid Margin="0">
         <Grid.RowDefinitions>
@@ -29,7 +35,27 @@
 
                     <Button x:Name="BtnNew" Content="新建" Style="{StaticResource Btn}" Margin="0,0,6,0" Click="OnNewProject"/>
                     <Button x:Name="BtnOpen" Content="打开" Style="{StaticResource Btn}" Margin="0,0,6,0" Click="OnOpenProject"/>
-                    <Button x:Name="BtnSave" Content="保存" Style="{StaticResource Btn}" Margin="0,0,14,0" Click="OnSaveProject"/>
+                    <Button x:Name="BtnSave" Content="保存" Style="{StaticResource Btn}" Margin="0,0,6,0" Click="OnSaveProject"
+                            ToolTip="保存工程（Ctrl+S）"/>
+                    <Button x:Name="BtnUndo" Style="{StaticResource IconBtn}" Margin="0,0,4,0"
+                            ToolTip="撤销（最多 10 步）" Click="OnUndo" IsEnabled="False">
+                        <Viewbox Width="16" Height="16">
+                            <Path Stretch="Uniform" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                  Data="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/>
+                        </Viewbox>
+                    </Button>
+                    <Button x:Name="BtnRedo" Style="{StaticResource IconBtn}" Margin="0,0,14,0"
+                            ToolTip="重做" Click="OnRedo" IsEnabled="False">
+                        <Viewbox Width="16" Height="16">
+                            <Path Stretch="Uniform" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                  Data="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"
+                                  RenderTransformOrigin="0.5,0.5">
+                                <Path.RenderTransform>
+                                    <ScaleTransform ScaleX="-1"/>
+                                </Path.RenderTransform>
+                            </Path>
+                        </Viewbox>
+                    </Button>
                 </StackPanel>
 
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
