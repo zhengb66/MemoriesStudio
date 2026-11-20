@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
-using System.Windows.Threading;
 using MemoriesStudio.Models;
 using MemoriesStudio.Services;
 using Microsoft.Win32;
@@ -21,21 +20,16 @@ public partial class ExportWindow : Window
         InitializeComponent();
         _project = project;
 
-        CmbRes.ItemsSource = ProjectFile.Presets;
-        CmbRes.DisplayMemberPath = "Name";
-        CmbRes.SelectedIndex = ProjectFile.Presets.ToList()
-            .FindIndex(p => p.Width == project.Width && p.Height == project.Height) is var i && i >= 0 ? i : 0;
-
-        CmbFps.ItemsSource = new[] { 24, 25, 30, 50, 60 };
-        CmbFps.SelectedItem = project.Fps is 24 or 25 or 30 or 50 or 60 ? project.Fps : 30;
+        // 分辨率/帧率统一取工程设置（「设置」对话框），导出窗口只读展示，不再单独提供下拉
+        TxtResFps.Text = $"{project.Width}×{project.Height} · {project.Fps}fps  （在「设置」中修改）";
 
         CmbQuality.ItemsSource = new[] { "高画质（推荐）", "标准", "小体积" };
         CmbQuality.SelectedIndex = 0;
 
-        // 实测（RTX 3070 Ti，1080p 运动内容 cq/crf16）：NVENC 保留 84% 细节、
-        // libx264 保留 99% —— 硬编在运动画面上明显偏软，默认走 CPU 画质优先。
-        CmbEncoder.ItemsSource = new[] { "CPU（画质优先，推荐）", "GPU 加速（更快，清晰度略低）" };
-        CmbEncoder.SelectedIndex = 0;
+        // 统一软编码：AVC 兼容广，HEVC 同画质体积更小。
+        // 默认按分辨率：720p/1080p（≤1920）用 AVC，2K/4K 用 HEVC。
+        CmbFormat.ItemsSource = new[] { "AVC（H.264，兼容性好）", "HEVC（H.265，体积更小）" };
+        CmbFormat.SelectedIndex = ExportOptions.DefaultCodecFor(project.Width) == VideoCodec.Hevc ? 1 : 0;
 
         var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "MemoriesStudio");
         Directory.CreateDirectory(dir);
@@ -43,20 +37,19 @@ public partial class ExportWindow : Window
         foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
         TxtPath.Text = Path.Combine(dir, $"{name}_{DateTime.Now:yyyyMMdd_HHmm}.mp4");
 
-        CmbRes.SelectionChanged += (_, _) => UpdateSummary();
-        CmbFps.SelectionChanged += (_, _) => UpdateSummary();
+        CmbFormat.SelectionChanged += (_, _) => UpdateSummary();
         UpdateSummary();
     }
 
-    private ResolutionPreset Preset => CmbRes.SelectedItem as ResolutionPreset ?? ProjectFile.Presets[0];
-    private int Fps => CmbFps.SelectedItem is int f ? f : 30;
+    /// <summary>当前选中的编码格式（列表顺序与 VideoCodec 枚举一致：0=AVC，1=HEVC）。</summary>
+    private VideoCodec SelectedCodec => CmbFormat.SelectedIndex == 1 ? VideoCodec.Hevc : VideoCodec.Avc;
 
     private void UpdateSummary()
     {
         var total = _project.TotalDuration;
-        var frames = (long)Math.Round(total * Fps);
+        var frames = (long)Math.Round(total * _project.Fps);
         TxtSummary.Text = $"共 {_project.Clips.Count} 个片段 · 时长 {total:0.0} 秒 · " +
-                          $"{Preset.Width}×{Preset.Height} · {Fps}fps · 约 {frames} 帧";
+                          $"{_project.Width}×{_project.Height} · {_project.Fps}fps · {ExportOptions.DisplayName(SelectedCodec)} · 约 {frames} 帧";
     }
 
     private void OnBrowse(object sender, RoutedEventArgs e)
@@ -87,19 +80,13 @@ public partial class ExportWindow : Window
         }
 
         var crf = CmbQuality.SelectedIndex switch { 0 => 16, 1 => 20, _ => 24 };
-        var hw = CmbEncoder.SelectedIndex == 1;
+        var codec = SelectedCodec;
+        var codecName = codec == VideoCodec.Hevc ? "libx265" : "libx264";
 
-        if (hw)
-        {
-            var enc = await FfmpegService.Instance.DetectHardwareEncoderAsync();
-            hw = enc is not null;
-            if (!hw) Append("未检测到 NVENC/QSV/AMF，自动改用 CPU 编码（libx264）。");
-        }
-
-        var opt = new ExportOptions(path, Preset.Width, Preset.Height, Fps, crf, hw);
+        var opt = new ExportOptions(path, _project.Width, _project.Height, _project.Fps, crf, codec);
         var plan = _engine.BuildPlan(_project, opt);
         Append($"输出：{path}");
-        Append($"时长：{plan.TotalDuration:0.0}s　片段：{_project.Clips.Count}　编码器：{(hw ? "h264_nvenc" : "libx264")}　CRF：{crf}");
+        Append($"时长：{plan.TotalDuration:0.0}s　片段：{_project.Clips.Count}　编码：{ExportOptions.DisplayName(codec)}（{codecName}）　CRF：{crf}");
         Append("");
 
         _running = true;
@@ -170,6 +157,12 @@ public partial class ExportWindow : Window
         }
         Close();
     }
+
+    /// <summary>自检：导出窗口的分辨率显示、编码格式与是否还保留了独立下拉/硬编码选项。</summary>
+    public string DescribeForTest()
+        => $"resfps={TxtResFps.Text} codec={SelectedCodec} default={ExportOptions.DefaultCodecFor(_project.Width)} " +
+           $"hasCmbEncoder={(FindName("CmbEncoder") is not null)} hasCmbRes={(FindName("CmbRes") is not null)} " +
+           $"proj={_project.Width}x{_project.Height}@{_project.Fps}";
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {

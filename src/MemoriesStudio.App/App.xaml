@@ -20,7 +20,6 @@
         <SolidColorBrush x:Key="TextDimBrush" Color="#9698A3"/>
         <SolidColorBrush x:Key="AccentBrush" Color="#E8A33D"/>
         <SolidColorBrush x:Key="AccentSoftBrush" Color="#4A3A1E"/>
-        <SolidColorBrush x:Key="DangerBrush" Color="#E0605A"/>
 
         <!-- ============ 文本 ============ -->
         <Style TargetType="TextBlock">
@@ -45,34 +44,6 @@
 
         <Style TargetType="Label">
             <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
-        </Style>
-
-        <Style x:Key="NumBox" TargetType="TextBox">
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
-            <Setter Property="Background" Value="{StaticResource Panel2Brush}"/>
-            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
-            <Setter Property="CaretBrush" Value="{StaticResource TextBrush}"/>
-            <Setter Property="Padding" Value="6,3"/>
-            <Setter Property="FontSize" Value="12"/>
-            <Setter Property="FontFamily" Value="Consolas, Microsoft YaHei UI"/>
-            <Setter Property="VerticalContentAlignment" Value="Center"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="TextBox">
-                        <Border x:Name="bd" Background="{TemplateBinding Background}"
-                                BorderBrush="{TemplateBinding BorderBrush}"
-                                BorderThickness="1" CornerRadius="4">
-                            <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"
-                                          VerticalAlignment="Center"/>
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
         </Style>
 
         <!-- ============ 按钮 ============ -->
@@ -213,33 +184,6 @@
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
                                 <Setter TargetName="bd" Property="Background" Value="{StaticResource AccentSoftBrush}"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-
-        <Style x:Key="DarkCheck" TargetType="CheckBox">
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
-            <Setter Property="FontSize" Value="12"/>
-            <Setter Property="FontFamily" Value="Microsoft YaHei UI, Segoe UI"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="CheckBox">
-                        <StackPanel Orientation="Horizontal">
-                            <Border x:Name="box" Width="16" Height="16" CornerRadius="3"
-                                    Background="{StaticResource Panel2Brush}"
-                                    BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" VerticalAlignment="Center">
-                                <Path x:Name="check" Data="M1,5 L3.4,7.4 L8,2.2" Stroke="{StaticResource AccentBrush}"
-                                      StrokeThickness="1.8" Visibility="Collapsed" Margin="2"/>
-                            </Border>
-                            <ContentPresenter Margin="7,0,0,0" VerticalAlignment="Center"/>
-                        </StackPanel>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsChecked" Value="True">
-                                <Setter TargetName="check" Property="Visibility" Value="Visible"/>
-                                <Setter TargetName="box" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>

@@ -62,6 +62,11 @@ public partial class MainWindow : Window
     private Clip? _selected;
     private string? _projectPath;
     private bool _suppressUi;
+    private int _bulkEdit;        // >0 时挂起 Clips.CollectionChanged 的整表刷新，避免批量增删的 O(n²)
+    // 素材探测回填防抖：打开工程时 741 个素材各自完成探测，原本每个都整表重绘一次；
+    // 改成最后一次探测后统一刷一次（250ms 防抖），大工程不再持续卡界面。
+    private readonly System.Windows.Threading.DispatcherTimer _probeRefreshTimer = new()
+        { Interval = TimeSpan.FromMilliseconds(250) };
     private bool _dirty;          // 有未保存的更改时，关闭程序前询问
     private bool _playing;
     private bool _scrubPreview = true;   // 暂停状态用快速抓帧渲染视频（拖动进度条实时预览）
@@ -74,7 +79,6 @@ public partial class MainWindow : Window
     // 解码器绑定到「片段实例」而不是文件路径：同一视频重复入轨时，路径相同但片段不同，
     // 仍必须切换/重开解码器，否则主画面会停在上一段尾帧。
     private readonly Guid?[] _videoClipId = new Guid?[2];
-    private bool _uiReady;      // InitializeComponent 期间控件会触发 ValueChanged，未就绪时忽略
 
     // 抓帧队列：仅保留最新请求，旧结果作废
     private (Guid ClipId, double SrcTime)? _scrubWant;
@@ -108,15 +112,21 @@ public partial class MainWindow : Window
         Timeline.SeekRequested += OnTimelineSeek;
         Timeline.ThumbnailProvider = GetThumbnailForTimeline;
         Timeline.AssetsDropped += OnTimelineAssetsDropped;
-        Timeline.ClipsReordering += (_, _) => PushUndo();
+        Timeline.ClipsReordering += (_, _) => { PushUndo(); BeginBulkEdit(); };
         Timeline.ClipsReordered += OnTimelineClipsReordered;
+
+        // 探测回填后的整表刷新防抖：连续完成只刷一次
+        _probeRefreshTimer.Tick += (_, _) =>
+        {
+            _probeRefreshTimer.Stop();
+            RefreshAfterTimelineEdit();
+            if (_selected is not null) RefreshInspector();
+        };
 
         AttachProjectEvents(_project);
         CompositionTarget.Rendering += OnRendering;
         Loaded += OnLoaded;
         Closing += OnClosingWindow;
-
-        _uiReady = true;
     }
 
     // ==================================================================== 启动
@@ -225,11 +235,14 @@ public partial class MainWindow : Window
 
         var added = 0;
         var skipped = 0;
+        // 去重索引：原本每个文件都扫描整个素材库（1290×1290/2 次比较），打开大工程时明显卡顿。
+        // 用 HashSet 一次建成，逐文件 O(1) 判定。
+        var existing = new HashSet<string>(_assets.Select(a => a.Path), StringComparer.OrdinalIgnoreCase);
         foreach (var f in files)
         {
             var kind = KindOf(f);
             if (kind is null) continue;
-            if (_assets.Any(a => string.Equals(a.Path, f, StringComparison.OrdinalIgnoreCase)))
+            if (!existing.Add(f))
             {
                 skipped++;
                 continue;
@@ -241,8 +254,14 @@ public partial class MainWindow : Window
         }
 
         // 后台逐个补齐探测信息与缩略图（计数已由 CollectionChanged 实时刷新）
+        // 预建 路径→片段 索引：原本每个素材回填都要遍历全部片段（741×740 次字符串比较），
+        // 打开大工程时把 UI 线程卡住数秒；这里一次建成 O(n)，后续查询 O(1)。
+        var clipsByPath = _project.Clips
+            .Where(c => !string.IsNullOrEmpty(c.SourcePath))
+            .GroupBy(c => c.SourcePath, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
         foreach (var a in _assets.Where(a => a.Width == 0 && a.Kind != MediaKind.Audio).ToList())
-            _ = LoadAssetInfoAsync(a);
+            _ = LoadAssetInfoAsync(a, clipsByPath);
 
         // 手动导入：新图片后台批量体检（6 路并行完整解码），损坏的即时标红；缓存命中的秒过
         if (healthCheck)
@@ -279,7 +298,7 @@ public partial class MainWindow : Window
         catch { /* 体检失败不影响导入 */ }
     }
 
-    private async Task LoadAssetInfoAsync(MediaAsset asset)
+    private async Task LoadAssetInfoAsync(MediaAsset asset, Dictionary<string, List<Clip>>? clipsByPath = null)
     {
         if (string.IsNullOrEmpty(asset.Path) || !File.Exists(asset.Path)) return;
         await _probeGate.WaitAsync();
@@ -317,11 +336,17 @@ public partial class MainWindow : Window
                 }
 
                 // 探测信息晚到：回填同路径的片段（分辨率 / 原声 / 素材总时长），
-                // 若片段时长还是旧默认值，一并恢复为素材实际时长
+                // 若片段时长还是旧默认值，一并恢复为素材实际时长。
+                // 用预建的路径索引取代每次全表扫描；候选仍按实时 SourcePath 复核，
+                // 以兼容探测期间 stale still 重建改写路径的情况。
+                var candidates = clipsByPath is not null && clipsByPath.TryGetValue(asset.Path, out var list)
+                    ? list
+                    : _project.Clips.Where(c => string.Equals(c.SourcePath, asset.Path, StringComparison.OrdinalIgnoreCase));
                 var touched = false;
-                foreach (var c in _project.Clips.Where(c => c.SourcePath == asset.Path && c.Kind != MediaKind.Image))
+                foreach (var c in candidates)
                 {
-                    if (probe is not null)
+                    if (!string.Equals(c.SourcePath, asset.Path, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (c.Kind != MediaKind.Image && probe is not null)
                     {
                         ApplyProbeToClip(c, probe);
                         touched = true;
@@ -331,19 +356,12 @@ public partial class MainWindow : Window
                         c.Duration = Math.Max(0.5, c.SourceDuration - c.SourceIn);
                         touched = true;
                     }
+                    if (thumb is not null) c.ThumbnailPath = thumb;
                 }
-                if (thumb is not null)
-                    foreach (var c in _project.Clips.Where(c => c.SourcePath == asset.Path))
-                        c.ThumbnailPath = thumb;
 
-                if (touched)
-                {
-                    RefreshAfterTimelineEdit();
-                    if (ReferenceEquals(_selected, _project.Clips.FirstOrDefault(c => c.SourcePath == asset.Path)) ||
-                        (_selected is not null && _selected.SourcePath == asset.Path))
-                        RefreshInspector();
-                }
-                Timeline.Refresh();
+                // 探测回填可能改变时长/选中项：用防抖统一刷一次，不再每个素材整表重绘
+                if (touched || _selected is not null && _selected.SourcePath == asset.Path)
+                    RequestProbeRefresh();
             });
         }
         catch { /* 单个素材失败不影响整体 */ }
@@ -438,6 +456,7 @@ public partial class MainWindow : Window
             ? InsertIndexForTime(atTime.Value)
             : InsertIndexForPlayhead();
 
+        BeginBulkEdit();
         foreach (var a in list)
         {
             // 视频 = 实际时长（用户可通过节选区间裁剪）；图片 = 4 秒；音乐不进时间轴
@@ -481,6 +500,7 @@ public partial class MainWindow : Window
 
             if (clip.Kind == MediaKind.Image) pendingFace.Add(clip);
         }
+        EndBulkEdit();
 
         if (count > 0)
         {
@@ -614,7 +634,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>把检测结果写入片段并联动 UI。必须在 UI 线程调用。</summary>
-    private void ApplyFaceResult(Clip clip, FaceDetector.FocusResult result)
+    /// <param name="deferUiRefresh">批量补检场景：只写数据不重绘，由调用方节流后统一刷新。</param>
+    private void ApplyFaceResult(Clip clip, FaceDetector.FocusResult result, bool deferUiRefresh = false)
     {
         var (nx, ny) = CoverMath.ToCanvas(result.X, result.Y,
             clip.SourceWidth, clip.SourceHeight, _project.Width, _project.Height);
@@ -630,9 +651,56 @@ public partial class MainWindow : Window
         clip.FaceDiag = $"{result.Method}/{result.Status}";
         MotionPresets.Apply(clip, _project.Clips.IndexOf(clip), _project.Width, _project.Height);
 
+        if (deferUiRefresh) return;   // 数据已落到 clip；重绘由批量方法节流合并
         if (ReferenceEquals(clip, _selected)) RefreshInspector();
         Timeline.Refresh();
         RenderFrame();
+    }
+
+    /// <summary>
+    /// 打开旧工程时对过时/缺失人脸数据的照片批量补检。
+    /// 检测后台 2 路并行（复用 _detectGate 上限），结果写入与 UI 重绘分两步：
+    /// 每张结果都立即落到 clip（运镜参数、FaceHV 标记不能丢），但 Timeline/RenderFrame
+    /// 只在攒够一批或超过 200ms 时刷新一次，避免每张都全量重绘导致打开后持续掉帧。
+    /// </summary>
+    private async Task UpgradeLegacyFacesAsync(List<Clip> targets)
+    {
+        if (targets.Count == 0) return;
+        var results = new List<(Clip Clip, FaceDetector.FocusResult Result)>();
+        var gate = new SemaphoreSlim(2);
+        var tasks = targets.Select(async clip =>
+        {
+            await gate.WaitAsync();
+            try
+            {
+                var r = await Task.Run(() => _faceDetector.Detect(clip.SourcePath));
+                lock (results) results.Add((clip, r));
+            }
+            catch { }
+            finally { gate.Release(); }
+        });
+        await Task.WhenAll(tasks);
+
+        // UI 线程按批写入 + 节流刷新。用 Dispatcher 定时器思路：累积到 8 张或 200ms 刷一次。
+        const int batch = 8;
+        var lastFlush = Environment.TickCount64;
+        for (var i = 0; i < results.Count; i++)
+        {
+            var (clip, r) = results[i];
+            await Dispatcher.InvokeAsync(() => ApplyFaceResult(clip, r, deferUiRefresh: true));
+            var due = (i + 1) % batch == 0;   // 每 8 张
+            var timed = Environment.TickCount64 - lastFlush >= 200;
+            if (due || timed || i == results.Count - 1)
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (_selected is not null) RefreshInspector();
+                    Timeline.Refresh();
+                    RenderFrame();
+                });
+                lastFlush = Environment.TickCount64;
+            }
+        }
     }
 
     /// <summary>
@@ -864,6 +932,7 @@ public partial class MainWindow : Window
     /// <summary>时间轴上拖动片段调整顺序后：刷新界面并标记工程已修改。</summary>
     private void OnTimelineClipsReordered(object? sender, EventArgs e)
     {
+        EndBulkEdit();   // 恢复 CollectionChanged 刷新（内部已刷新一次）；下面再做完整刷新
         MarkDirty();
         Timeline.Refresh();
         RefreshAfterTimelineEdit();
@@ -881,8 +950,26 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>探测回填后请求一次整表刷新；连续调用只在最后一次之后刷一次（必须在 UI 线程调用）。</summary>
+    private void RequestProbeRefresh()
+    {
+        if (_bulkEdit > 0) return;   // 外层批量操作会在结束时统一刷新
+        _probeRefreshTimer.Stop();
+        _probeRefreshTimer.Start();
+    }
+
+    /// <summary>批量增删片段期间调用，挂起每次 CollectionChanged 的整表刷新；结束后必须配对 EndBulkEdit。</summary>
+    private void BeginBulkEdit() => _bulkEdit++;
+
+    /// <summary>批量操作结束：恢复刷新并统一刷新一次（抵消期间被挂起的全部通知）。</summary>
+    private void EndBulkEdit()
+    {
+        if (--_bulkEdit <= 0) { _bulkEdit = 0; RefreshAfterTimelineEdit(); }
+    }
+
     private void RefreshAfterTimelineEdit()
     {
+        if (_bulkEdit > 0) return;
         Timeline.Project = _project;
         Timeline.Refresh();
         _suppressUi = true;
@@ -1344,7 +1431,9 @@ public partial class MainWindow : Window
 
         var label = clips.Count == 1 ? clips[0].FileName : $"{clips.Count} 个片段";
         MarkDirty();
+        BeginBulkEdit();
         foreach (var c in clips.ToList()) _project.Clips.Remove(c);
+        EndBulkEdit();
 
         _selected = null;
         Timeline.SetClipSelection(Array.Empty<Clip>());
@@ -2297,12 +2386,10 @@ public partial class MainWindow : Window
 
         // 旧工程的图片片段检测数据过时（FaceHV<2：Haar 时代误检多、框偏移）或缺失 →
         // 用 YuNet 重新检测，让取景对新老工程都准确生效（后台执行，不阻塞打开工程）
-        foreach (var c in _project.Clips
-                     .Where(c => c.Kind == MediaKind.Image && c.FaceHV < 2 && File.Exists(c.SourcePath))
-                     .ToList())
-        {
-            _ = DetectFaceAsync(c);
-        }
+        var legacyFaces = _project.Clips
+            .Where(c => c.Kind == MediaKind.Image && c.FaceHV < 2 && File.Exists(c.SourcePath))
+            .ToList();
+        if (legacyFaces.Count > 0) _ = UpgradeLegacyFacesAsync(legacyFaces);
 
         // 旧运镜数据（MotionV<3）→ 按"按素材自动取景"重新生成
         var upgraded = 0;
@@ -2332,13 +2419,25 @@ public partial class MainWindow : Window
             .ToList();
         if (videoClips.Count == 0) return;
 
-        var fixedCount = 0;
-        foreach (var clip in videoClips)
+        // 探测并发化：原本逐个 await（59 个视频串行，每个 LibVLC 解析几十~几百 ms，累计可达数秒）。
+        // 复用 _probeGate 限 4 路，结果先收集到线程安全列表，最后统一回 UI 线程回填。
+        var probed = new List<(Clip Clip, ProbeResult Probe)>();
+        await Task.WhenAll(videoClips.Select(async clip =>
         {
-            var probe = await MediaProbe.ProbeAsync(clip.SourcePath);
-            if (probe is null || probe.Duration <= 0.2) continue;
+            await _probeGate.WaitAsync();
+            try
+            {
+                var probe = await MediaProbe.ProbeAsync(clip.SourcePath);
+                if (probe is not null && probe.Duration > 0.2)
+                    lock (probed) probed.Add((clip, probe));
+            }
+            finally { _probeGate.Release(); }
+        }));
 
-            await Dispatcher.InvokeAsync(() =>
+        await Dispatcher.InvokeAsync(() =>
+        {
+            var fixedCount = 0;
+            foreach (var (clip, probe) in probed)
             {
                 ApplyProbeToClip(clip, probe);
                 var wasDefault = IsLegacyDefaultDuration(clip);
@@ -2353,11 +2452,7 @@ public partial class MainWindow : Window
                     clip.Duration = Math.Clamp(clip.Duration, 0.5,
                         Math.Max(0.5, probe.Duration - clip.SourceIn));
                 }
-            });
-        }
-
-        await Dispatcher.InvokeAsync(() =>
-        {
+            }
             RefreshAfterTimelineEdit();
             RefreshInspector();
             RenderFrame();
@@ -2373,12 +2468,16 @@ public partial class MainWindow : Window
     /// </summary>
     private async Task NormalizeImageOrientationAsync()
     {
-        var rotated = _project.Clips
+        // 逐张读 EXIF 文件头放到后台：上千张图时同步执行会把 UI 线程卡住数秒。
+        // 只读文件头（不做整图解码），搬到后台即可，无需并发也能让界面保持响应。
+        var samples = _project.Clips
             .Where(c => c.Kind == MediaKind.Image && File.Exists(c.SourcePath))
             .GroupBy(c => c.SourcePath, StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())
-            .Where(c => MediaProbe.GetOrientation(c.SourcePath) is 5 or 6 or 7 or 8)
             .ToList();
+        var rotated = await Task.Run(() => samples
+            .Where(c => MediaProbe.GetOrientation(c.SourcePath) is 5 or 6 or 7 or 8)
+            .ToList());
         if (rotated.Count == 0) return;
 
         var fixedCount = 0;
@@ -2463,15 +2562,16 @@ public partial class MainWindow : Window
             if (_playing) PausePlayback();
             _assets.Clear();
             foreach (var a in s.Assets) _assets.Add(a);
+            BeginBulkEdit();
             _project.Clips.Clear();
             foreach (var c in s.Clips) _project.Clips.Add(c);
+            EndBulkEdit();
 
             _selected = s.Selected is not null && _project.Clips.Contains(s.Selected) ? s.Selected : null;
             Timeline.SetClipSelection(_selected is null ? Array.Empty<Clip>() : new[] { _selected }, _selected);
             AssetsList.SelectedItems.Clear();
             AssetsList.SelectedItem = null;
 
-            RefreshAfterTimelineEdit();
             RefreshInspector();
             InvalidateVideoSeek();
             RenderFrame();
@@ -2691,6 +2791,17 @@ public partial class MainWindow : Window
         _time = Math.Min(0.5, _project.TotalDuration * 0.1);
         RenderFrame();
         await Task.Delay(1800);
+    }
+
+    /// <summary>自检：测量打开工程（含素材重建/探测/规范化）的耗时，返回汇总文本。</summary>
+    public async Task<string> OpenBenchForTest(string path)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var ok = await OpenProjectFromPathAsync(path, confirmDiscard: false);
+        sw.Stop();
+        // 再给后台 fire-and-forget 的探测一点收敛时间，统计最终素材数
+        await Task.Delay(1500);
+        return $"ok={ok} elapsed={sw.Elapsed.TotalMilliseconds:0}ms clips={_project.Clips.Count} assets={_assets.Count}";
     }
 
     /// <summary>自检访问器：当前工程。</summary>

@@ -60,6 +60,72 @@ public partial class App : Application
             return;
         }
 
+        // 打开工程耗时基准自检：MemoriesStudio.exe --open-bench <工程.msproj>
+        // 测量打开工程（含素材重建/探测/规范化）耗时，结果写 memories_openbench.log
+        if (e.Args.Length >= 2 && e.Args[0] == "--open-bench")
+        {
+            var benchPath = e.Args[1];
+            var benchWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = benchWindow;
+            benchWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    info = await benchWindow.OpenBenchForTest(benchPath);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex.Message;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_openbench.log"),
+                        $"RESULT={info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
+        // 导出窗口自检：MemoriesStudio.exe --export-dlg-test <工程.msproj> <输出png>
+        // 验证导出窗口分辨率只读展示、无独立下拉，并截图核对布局
+        if (e.Args.Length >= 3 && e.Args[0] == "--export-dlg-test")
+        {
+            var srcPath = e.Args[1];
+            var pngPath = e.Args[2];
+            var win = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = win;
+            win.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    await win.OpenProjectForTest(srcPath);
+                    var proj = win.ProjectForTest!;
+                    var dlg = new Views.ExportWindow(proj);
+                    info = dlg.DescribeForTest();
+                    dlg.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+                    dlg.Show();
+                    await Task.Delay(600);
+                    SaveWindowPng(dlg, pngPath);
+                    dlg.Close();
+                }
+                catch (Exception ex) { info = "ERROR " + ex.Message; }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_exportdlg.log"),
+                        $"RESULT={info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
         // 无界面预览快照自检：MemoriesStudio.exe --shot-test <素材目录|工程> <时间秒> <输出png>
         // 把预览区真实渲染结果落盘，用于核对竖幅平移的取景几何（黑边 / 裁切）
         if (e.Args.Length >= 4 && e.Args[0] == "--shot-test")
@@ -863,7 +929,6 @@ public partial class App : Application
 
             Dispatcher.InvokeAsync(async () =>
             {
-                var info = "";
                 try
                 {
                     await window.OpenProjectForTest(projectPath);
@@ -1099,18 +1164,22 @@ public partial class App : Application
             var h = args.Length > 4 ? int.Parse(args[4]) : 720;
             var fps = args.Length > 5 ? int.Parse(args[5]) : 30;
             var crf = args.Length > 6 ? int.Parse(args[6]) : 20;
+            // 第 7 参数可选编码格式 avc/hevc；不传则按分辨率自动（≤1920 AVC，>1920 HEVC）
+            var codec = args.Length > 7
+                ? (args[7].Equals("hevc", StringComparison.OrdinalIgnoreCase) ? VideoCodec.Hevc : VideoCodec.Avc)
+                : ExportOptions.DefaultCodecFor(w);
 
             log.AppendLine($"project={args[1]} clips={project.Clips.Count} total={project.TotalDuration:0.00}s");
-            log.AppendLine($"output={outPath} {w}x{h}@{fps} crf={crf}");
+            log.AppendLine($"output={outPath} {w}x{h}@{fps} crf={crf} codec={codec}");
 
             var engine = new ExportEngine();
-            var plan = engine.BuildPlan(project, new ExportOptions(outPath, w, h, fps, crf, false));
+            var plan = engine.BuildPlan(project, new ExportOptions(outPath, w, h, fps, crf, codec));
             log.AppendLine("--- filter graph ---");
             log.AppendLine(plan.FilterScript);
             log.AppendLine("--------------------");
 
             var progress = new Progress<ExportProgress>(p => log.AppendLine($"{p.Percent:0.0}% {p.Status}"));
-            engine.ExportAsync(project, new ExportOptions(outPath, w, h, fps, crf, false), progress, CancellationToken.None)
+            engine.ExportAsync(project, new ExportOptions(outPath, w, h, fps, crf, codec), progress, CancellationToken.None)
                   .GetAwaiter().GetResult();
 
             log.AppendLine("RESULT=OK");

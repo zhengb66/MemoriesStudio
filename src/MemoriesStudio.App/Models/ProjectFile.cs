@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Text.Json.Serialization;
 
 namespace MemoriesStudio.Models;
@@ -31,7 +33,19 @@ public sealed class ProjectFile : ObservableObject
     public int Height { get => _height; set { Set(ref _height, value); Raise(nameof(AspectRatio)); } }
     public int Fps { get => _fps; set => Set(ref _fps, Math.Clamp(value, 12, 60)); }
 
-    public ObservableCollection<Clip> Clips { get; set; } = new();
+    private ObservableCollection<Clip> _clips = new();
+    public ObservableCollection<Clip> Clips
+    {
+        get => _clips;
+        set
+        {
+            if (ReferenceEquals(_clips, value)) return;
+            UnhookClips(_clips);
+            _clips = value ?? new();
+            HookClips(_clips);
+            _starts = null;
+        }
+    }
 
     /// <summary>
     /// 背景音乐文件列表（全局设置里维护）。导出时按顺序循环铺满整条时间轴：
@@ -93,9 +107,56 @@ public sealed class ProjectFile : ObservableObject
 
     // ---------------- 时间轴计算 ----------------
 
-    /// <summary>每个片段在成片时间轴上的起点（考虑转场重叠）。</summary>
+    // ComputeStarts 在播放/绘制/命中测试热路径中单帧被调用 8~12 次，每次 new 数组 + O(n)。
+    // 这里缓存结果，靠集合/片段属性变更自动失效；12 个调用点无需改动。
+    [JsonIgnore] private double[]? _starts;
+    [JsonIgnore] private NotifyCollectionChangedEventHandler? _clipsChangedHandler;
+    [JsonIgnore] private PropertyChangedEventHandler? _clipPropertyHandler;
+
+    public ProjectFile()
+    {
+        HookClips(_clips);
+    }
+
+    private void HookClips(ObservableCollection<Clip> clips)
+    {
+        _clipsChangedHandler ??= OnClipsChanged;
+        _clipPropertyHandler ??= OnClipPropertyChanged;
+        clips.CollectionChanged += _clipsChangedHandler;
+        foreach (var c in clips) c.PropertyChanged += _clipPropertyHandler;
+    }
+
+    private void UnhookClips(ObservableCollection<Clip> clips)
+    {
+        if (_clipsChangedHandler is not null) clips.CollectionChanged -= _clipsChangedHandler;
+        if (_clipPropertyHandler is not null)
+            foreach (var c in clips) c.PropertyChanged -= _clipPropertyHandler;
+    }
+
+    private void OnClipsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        _starts = null;
+        if (_clipPropertyHandler is null) return;
+        if (e.NewItems is not null)
+            foreach (Clip c in e.NewItems) c.PropertyChanged += _clipPropertyHandler;
+        if (e.OldItems is not null)
+            foreach (Clip c in e.OldItems) c.PropertyChanged -= _clipPropertyHandler;
+        if (e.Action == NotifyCollectionChangedAction.Reset && sender is ObservableCollection<Clip> col)
+            foreach (var c in col) c.PropertyChanged += _clipPropertyHandler;
+    }
+
+    private void OnClipPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        // 只有影响起点计算的属性才失效：Duration 影响本段与下一段，Transition/TransitionDuration
+        // 影响本段与上一段的重叠。其余（人脸、运镜、字幕）不改变时间轴布局。
+        if (e.PropertyName is nameof(Clip.Duration) or nameof(Clip.Transition) or nameof(Clip.TransitionDuration))
+            _starts = null;
+    }
+
+    /// <summary>每个片段在成片时间轴上的起点（考虑转场重叠）。结果缓存，变更自动失效。</summary>
     public double[] ComputeStarts()
     {
+        if (_starts is not null) return _starts;
         var starts = new double[Clips.Count];
         for (var i = 0; i < Clips.Count; i++)
         {
@@ -103,6 +164,7 @@ public sealed class ProjectFile : ObservableObject
                 ? 0
                 : starts[i - 1] + Clips[i - 1].Duration - Clips[i].EffectiveTransition(Clips[i - 1]);
         }
+        _starts = starts;
         return starts;
     }
 

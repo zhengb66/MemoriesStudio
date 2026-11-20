@@ -8,13 +8,24 @@ using MemoriesStudio.Models;
 
 namespace MemoriesStudio.Services;
 
+/// <summary>视频编码格式：AVC(H.264) 兼容性最好，HEVC(H.265) 同画质体积更小。</summary>
+public enum VideoCodec { Avc, Hevc }
+
 public sealed record ExportOptions(
     string OutputPath,
     int Width,
     int Height,
     int Fps,
     int Crf,
-    bool UseHardware);
+    VideoCodec Codec)
+{
+    /// <summary>默认规则：宽度 ≤1920（720p/1080p）用 AVC，2K/4K 用 HEVC。</summary>
+    public static VideoCodec DefaultCodecFor(int width) => width <= 1920 ? VideoCodec.Avc : VideoCodec.Hevc;
+
+    /// <summary>编码格式的界面显示名。</summary>
+    public static string DisplayName(VideoCodec codec)
+        => codec == VideoCodec.Hevc ? "HEVC（H.265）" : "AVC（H.264）";
+}
 
 public sealed record ExportProgress(double Percent, string Status, double Seconds);
 
@@ -919,23 +930,20 @@ public sealed class ExportEngine
             }
         }
 
-        // ---- 6. 编码参数 ----
-        var usesHardware = opt.UseHardware;
-        if (usesHardware)
+        // ---- 6. 编码参数（统一软编码：AVC→libx264，HEVC→libx265） ----
+        // 硬编码在运动画面上明显偏软（实测 NVENC 保留 84% 细节 vs libx264 99%），
+        // 因此只提供软编码，画质优先。CRF 数值两种编码器通用。
+        if (opt.Codec == VideoCodec.Hevc)
         {
-            // NVENC 的 cq 数值与 x264 的 crf 不等价：默认 p5 无 AQ 时细节明显偏软。
-            // p7 + tune hq + 空域/时域 AQ + lookahead 是实测细节保留最好的组合。
-            args.Add("-c:v"); args.Add("h264_nvenc");
-            args.Add("-preset"); args.Add("p7");
-            args.Add("-tune"); args.Add("hq");
-            args.Add("-rc"); args.Add("vbr");
-            args.Add("-cq"); args.Add(opt.Crf.ToString(CultureInfo.InvariantCulture));
-            args.Add("-b:v"); args.Add("0");
-            args.Add("-spatial-aq"); args.Add("true");
-            args.Add("-temporal-aq"); args.Add("true");
-            args.Add("-rc-lookahead"); args.Add("20");
-            args.Add("-bf"); args.Add("2");
-            args.Add("-multipass"); args.Add("fullres");
+            args.Add("-c:v"); args.Add("libx265");
+            args.Add("-preset"); args.Add("medium");
+            args.Add("-crf"); args.Add(opt.Crf.ToString(CultureInfo.InvariantCulture));
+            // x265 默认把详细统计刷到 stderr，关闭日志避免污染导出诊断；错误仍可见
+            args.Add("-x265-params"); args.Add("log-level=error");
+            // HEVC 默认 tag 是 hev1（参数集可在码流内）；hvc1 把参数集固定在容器头，
+            // iPhone/Mac 等 Apple 设备只认 hvc1，家庭视频要在多种设备播放，统一打成 hvc1。
+            // libx265 已把参数集写入 extradata，加此标记安全（ffprobe 验证 codec_tag_string=hvc1）。
+            args.Add("-tag:v"); args.Add("hvc1");
         }
         else
         {
@@ -944,7 +952,8 @@ public sealed class ExportEngine
             args.Add("-crf"); args.Add(opt.Crf.ToString(CultureInfo.InvariantCulture));
         }
         args.Add("-pix_fmt"); args.Add("yuv420p");
-        args.Add("-profile:v"); args.Add("high");
+        // HEVC 的 profile 名与 H.264 不同：main 对应 8bit 4:2:0（等价于 H.264 high 的常用场景）
+        args.Add("-profile:v"); args.Add(opt.Codec == VideoCodec.Hevc ? "main" : "high");
         args.Add("-level"); args.Add(LevelFor(W, H, fps));
         if (!videoOnly)
         {

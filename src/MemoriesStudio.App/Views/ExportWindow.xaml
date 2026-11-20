@@ -19,13 +19,10 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="80"/>
                     <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="80"/>
-                    <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="分辨率" Style="{StaticResource FieldLabel}"/>
-                <ComboBox x:Name="CmbRes" Grid.Column="1" Style="{StaticResource Combo}" Margin="0,0,12,0"/>
-                <TextBlock Grid.Column="2" Text="帧率" Style="{StaticResource FieldLabel}"/>
-                <ComboBox x:Name="CmbFps" Grid.Column="3" Style="{StaticResource Combo}"/>
+                <TextBlock x:Name="TxtResFps" Grid.Column="1" Style="{StaticResource FieldLabel}"
+                           VerticalAlignment="Center" ToolTip="分辨率与帧率在「设置」中修改"/>
             </Grid>
 
             <Grid Margin="0,0,0,10">
@@ -37,8 +34,8 @@
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="画质" Style="{StaticResource FieldLabel}"/>
                 <ComboBox x:Name="CmbQuality" Grid.Column="1" Style="{StaticResource Combo}" Margin="0,0,12,0"/>
-                <TextBlock Grid.Column="2" Text="编码器" Style="{StaticResource FieldLabel}"/>
-                <ComboBox x:Name="CmbEncoder" Grid.Column="3" Style="{StaticResource Combo}"/>
+                <TextBlock Grid.Column="2" Text="编码格式" Style="{StaticResource FieldLabel}"/>
+                <ComboBox x:Name="CmbFormat" Grid.Column="3" Style="{StaticResource Combo}"/>
             </Grid>
 
             <Grid Margin="0,0,0,4">
