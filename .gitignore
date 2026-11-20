@@ -17,6 +17,11 @@ src/MemoriesStudio.Setup/payload.zip
 *.tmp
 media_cache/
 
+# ---- 本地辅助文件（备份/一次性脚本/检查报告，不入库）----
+backup_*/
+push_*.py
+源码检查报告_*.md
+
 # ---- 系统 ----
 Thumbs.db
 desktop.ini
