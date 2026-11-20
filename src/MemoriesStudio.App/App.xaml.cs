@@ -31,6 +31,69 @@ public partial class App : Application
             return;
         }
 
+        // 无界面时长补偿自检：MemoriesStudio.exe --duration-test
+        // 验证图片片段默认 3 秒、设置转场 +1、取消 -1、转场互切不加、视频不补偿。
+        if (e.Args.Length >= 1 && e.Args[0] == "--duration-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var logPath = Path.Combine(Path.GetTempPath(), "memories_duration_test.log");
+            try
+            {
+                var img = new Clip { Kind = MediaKind.Image, Duration = 3.0 };
+                var d0 = img.Duration;                                    // 3
+                img.SetTransitionCompensated(TransitionKind.CrossFade);
+                var d1 = img.Duration;                                    // 4
+                img.SetTransitionCompensated(TransitionKind.FadeBlack);   // 转场互切
+                var d2 = img.Duration;                                    // 4（不变）
+                img.SetTransitionCompensated(TransitionKind.None);
+                var d3 = img.Duration;                                    // 3
+
+                var vid = new Clip { Kind = MediaKind.Video, Duration = 8.0 };
+                vid.SetTransitionCompensated(TransitionKind.CrossFade);
+                var dv = vid.Duration;                                    // 8（视频不补偿）
+
+                var ok = Math.Abs(d0 - 3) < 1e-6 && Math.Abs(d1 - 4) < 1e-6
+                      && Math.Abs(d2 - 4) < 1e-6 && Math.Abs(d3 - 3) < 1e-6
+                      && Math.Abs(dv - 8) < 1e-6
+                      && img.Transition == TransitionKind.None;
+                File.WriteAllText(logPath,
+                    $"RESULT={(ok ? "OK" : "FAIL")} img: {d0:0.0}->{d1:0.0}->{d2:0.0}->{d3:0.0} video={dv:0.0}\r\n", Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(logPath, $"RESULT=FAIL err={ex.Message}\r\n", Encoding.UTF8);
+            }
+            Shutdown(0);
+            return;
+        }
+
+        // 无界面保存自检：MemoriesStudio.exe --save-test <工程.msproj> <输出副本.msproj>
+        // 验证 ProjectStore.Save 落盘时剔除无效字幕、保留有效字幕，且内存对象原样恢复。
+        if (e.Args.Length >= 3 && e.Args[0] == "--save-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var logPath = Path.Combine(Path.GetTempPath(), "memories_save_test.log");
+            try
+            {
+                var p = ProjectStore.Load(e.Args[1]) ?? throw new InvalidOperationException("工程读取失败");
+                var before = p.Clips.Sum(c => c.Captions.Count);
+                var validBefore = p.Clips.Sum(c => c.Captions.Count(x => x.IsValid));
+                ProjectStore.Save(p, e.Args[2]);
+                var memAfter = p.Clips.Sum(c => c.Captions.Count);   // 内存中应保持不变
+                var p2 = ProjectStore.Load(e.Args[2])!;
+                var savedAfter = p2.Clips.Sum(c => c.Captions.Count);
+                File.WriteAllText(logPath,
+                    $"RESULT={(savedAfter == validBefore && memAfter == before ? "OK" : "FAIL")} " +
+                    $"before={before} valid={validBefore} saved={savedAfter} memAfter={memAfter}\r\n", Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(logPath, $"RESULT=FAIL err={ex.Message}\r\n", Encoding.UTF8);
+            }
+            Shutdown(0);
+            return;
+        }
+
         // 无界面导入自检：MemoriesStudio.exe --import-test <图片路径>
         // 启动主窗口并走真实的导入代码路径，验证模板实例化 / 检测 / 预览渲染，然后自动退出
         if (e.Args.Length >= 2 && e.Args[0] == "--import-test")
@@ -50,7 +113,7 @@ public partial class App : Application
                 {
                     var logPath = Path.Combine(Path.GetTempPath(), "memories_import_test.log");
                     var clipInfo = string.Join("; ",
-                        window.Clips.Select(c => $"{Path.GetFileName(c.SourcePath)} dur={c.Duration:0.00} in={c.SourceIn:0.00} src={c.SourceDuration:0.00} {c.SourceWidth}x{c.SourceHeight}" +
+                        window.Clips.Select(c => $"{Path.GetFileName(c.SourcePath)} dur={c.Duration:0.00} in={c.SourceIn:0.00} src={c.SourceDuration:0.00} {c.SourceWidth}x{c.SourceHeight} trans={c.Transition}" +
                             (c.Kind == Models.MediaKind.Image ? $" face={c.FaceDetected} fh={c.FaceH:0.000} z0={c.StartZoom:0.00} z1={c.EndZoom:0.00} pan={c.PanV} fy0={c.StartFocusY:0.000} fy1={c.EndFocusY:0.000} diag={c.FaceDiag}" : "")));
                     File.WriteAllText(logPath,
                         $"RESULT=OK assets={window.AssetsCount} clips={window.ClipsCount} total={window.TotalDuration:0.00}\r\n{clipInfo}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);

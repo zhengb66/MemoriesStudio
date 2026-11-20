@@ -459,7 +459,7 @@ public partial class MainWindow : Window
         BeginBulkEdit();
         foreach (var a in list)
         {
-            // 视频 = 实际时长（用户可通过节选区间裁剪）；图片 = 4 秒；音乐不进时间轴
+            // 视频 = 实际时长（用户可通过节选区间裁剪）；图片 = 3 秒（转场时额外加 1 秒）；音乐不进时间轴
             if (a.Kind == MediaKind.Audio) continue;
 
             if (!undoPushed) { PushUndo(); undoPushed = true; }
@@ -473,7 +473,7 @@ public partial class MainWindow : Window
                 still = await Task.Run(() => MediaSource.ExtractStill(a.Path, a.Duration / 2));
 
             var duration = a.Kind == MediaKind.Image || still is not null
-                ? 4.0
+                ? 3.0
                 : Math.Max(0.5, a.Duration > 0.2 ? a.Duration : 5.0);
 
             var clip = new Clip
@@ -487,7 +487,7 @@ public partial class MainWindow : Window
                 HasAudio = still is null && a.HasAudio,
                 Duration = duration,
                 ThumbnailPath = a.ThumbnailPath ?? "",
-                Transition = TransitionKind.CrossFade,
+                Transition = TransitionKind.None,
                 TransitionDuration = 1.0,
                 Motion = MotionStyle.Auto
             };
@@ -1329,7 +1329,21 @@ public partial class MainWindow : Window
         if (_suppressUi || _selected is null) return;
         if (CmbTransition.SelectedItem is not Choice<TransitionKind> choice) return;
         MarkDirty();
-        _selected.Transition = choice.Value;
+        var oldDuration = _selected.Duration;
+        _selected.SetTransitionCompensated(choice.Value);
+
+        // 图片片段因转场补偿了时长，同步时长滑块/文本，避免显示与实际不一致
+        if (Math.Abs(_selected.Duration - oldDuration) > 1e-6)
+        {
+            _suppressUi = true;
+            try
+            {
+                SldDuration.Value = _selected.Duration;
+                TxtClipDuration.Text = $"{_selected.Duration:0.0}s";
+            }
+            finally { _suppressUi = false; }
+        }
+
         Timeline.Refresh();
         RenderFrame();
     }

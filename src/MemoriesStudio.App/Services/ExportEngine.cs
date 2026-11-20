@@ -874,7 +874,10 @@ public sealed class ExportEngine
                 }
                 else
                 {
-                    fc.Append($"[{la}][{lb}]concat=n=2:v=1:a=0[{merged}];\n");
+                    // concat 输出时间基固定为 1/1000000；若上层与 xfade 分支（时间基 1/fps）拼接，
+                    // ffmpeg 会因两侧 timebase 不一致报 "do not match ... xfade timebase" 而中断导出。
+                    // 这里把 concat 输出规整回 1/fps，与所有 v{i}/xfade 节点保持一致。
+                    fc.Append($"[{la}][{lb}]concat=n=2:v=1:a=0,settb=expr=1/{fps}[{merged}];\n");
                 }
                 nextLevel.Add((merged, laLen + lbLen - junctionTd, level[k].First));
             }

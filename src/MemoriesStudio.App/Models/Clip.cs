@@ -14,7 +14,7 @@ public sealed class Clip : ObservableObject
     private int _sourceWidth;
     private int _sourceHeight;
     private bool _hasAudio;
-    private TransitionKind _transition = TransitionKind.CrossFade;
+    private TransitionKind _transition = TransitionKind.None;
     private double _transitionDuration = 1.0;
     private MotionStyle _motion = MotionStyle.Auto;
 
@@ -198,6 +198,18 @@ public sealed class Clip : ObservableObject
 
     private string TransactionLabel()
         => Transition == TransitionKind.None ? "无转场" : $"{Transition.ToShort()} {TransitionDuration:0.0}s";
+
+    /// <summary>
+    /// 设置转场并对图片片段补偿时长：新增转场 +1 秒、取消转场 -1 秒，
+    /// 使转场占用的重叠时长不挤占片段原有内容时长（内容仍完整显示 3 秒）。
+    /// 转场类型之间互切不补偿；视频片段时长来自素材，不做补偿。
+    /// </summary>
+    public void SetTransitionCompensated(TransitionKind value)
+    {
+        if (Kind == MediaKind.Image && (Transition == TransitionKind.None) != (value == TransitionKind.None))
+            Duration = Math.Max(0.5, Duration + (value == TransitionKind.None ? -1.0 : 1.0));
+        Transition = value;
+    }
 
     /// <summary>
     /// 与上一片段之间实际生效的转场时长（受两侧片段时长限制）。
