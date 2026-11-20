@@ -1115,12 +1115,13 @@ public partial class MainWindow : Window
         _suppressUi = true;
         try
         {
-            // 图片默认给一段字幕（可直接打字使用）：起点 1 秒、终点留 1 秒，正好错过片段首尾的转场区。
-            // 4 秒片段即 1~3 秒。短片段做钳制，保证至少留出 0.5 秒有效区间且不越过片段末尾。
+            // 图片默认给一段字幕（可直接打字使用）：起点 1 秒、消失在 3 秒。
+            // 3 秒图片即 1~3 秒，铺满整段；带转场时片段时长会额外 +1 秒，字幕仍在 3 秒消失以避开尾部转场区。
+            // 短片段做钳制，保证至少留出 0.5 秒有效区间且不越过片段末尾。
             if (clip.IsImage && clip.Captions.Count == 0)
             {
                 var defaultStart = Math.Min(1.0, Math.Max(0, clip.Duration - 0.5));
-                var defaultEnd = Math.Min(clip.Duration, Math.Max(defaultStart + 0.5, clip.Duration - 1.0));
+                var defaultEnd = Math.Max(defaultStart + 0.5, Math.Min(3.0, clip.Duration));
                 clip.Captions.Add(new Caption { Start = defaultStart, End = defaultEnd });
             }
 
@@ -3100,7 +3101,7 @@ public partial class MainWindow : Window
         if (cap is null) return "FAIL no-default-caption";
 
         var expectStart = Math.Min(1.0, Math.Max(0, clip.Duration - 0.5));
-        var expectEnd = Math.Min(clip.Duration, Math.Max(expectStart + 0.5, clip.Duration - 1.0));
+        var expectEnd = Math.Max(expectStart + 0.5, Math.Min(3.0, clip.Duration));
         var ok = Math.Abs(cap.Start - expectStart) < 0.01 && Math.Abs(cap.End - expectEnd) < 0.01;
 
         var w = (int)Math.Max(2, ActualWidth);

@@ -17,7 +17,7 @@ public sealed class Caption : ObservableObject
 {
     private string _text = "";
     private double _start;
-    private double _end = 4.0;
+    private double _end = 3.0;
     private double _fontSizePct = 5.0;
     private string _colorPreset = "white";
     private CaptionPos _position = CaptionPos.Bottom;

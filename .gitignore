@@ -9,6 +9,7 @@ obj/
 build/
 dist/
 installer/
+installer_out*/
 versions/
 src/MemoriesStudio.Setup/payload.zip
 
