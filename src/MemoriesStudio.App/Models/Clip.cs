@@ -23,6 +23,7 @@ public sealed class Clip : ObservableObject
     private double _startFocusX = 0.5, _startFocusY = 0.5;
     private double _endFocusX = 0.5, _endFocusY = 0.5;
     private int _panV;
+    private int _rotation;   // 用户旋转（顺时针度）：0/90/180/270，叠加在 EXIF 方向之上
 
     private double _faceX = 0.5, _faceY = 0.5, _faceSy = 0.5;
     private double _faceH;
@@ -122,6 +123,23 @@ public sealed class Clip : ObservableObject
     /// 0 = 普通缩放/焦点运镜（横向素材）。
     /// </summary>
     public int PanV { get => _panV; set => Set(ref _panV, value); }
+
+    /// <summary>
+    /// 图片片段的用户旋转（顺时针度，0/90/180/270）。预览、时间轴缩略图与导出统一叠加这个角度；
+    /// 每旋转 90° 交换 SourceWidth/SourceHeight，让 cover / 运镜 / 人脸坐标准确落在旋转后的画面上。
+    /// </summary>
+    public int Rotation
+    {
+        get => _rotation;
+        set => Set(ref _rotation, ((value % 360) + 360) % 360);
+    }
+
+    /// <summary>顺时针旋转 90°，并交换源宽高（每转一次横竖互换）。</summary>
+    public void Rotate90()
+    {
+        Rotation = (Rotation + 90) % 360;
+        (_sourceWidth, _sourceHeight) = (_sourceHeight, _sourceWidth);
+    }
 
     /// <summary>检测到的人脸中心（归一化），供自动运镜使用。</summary>
     public double FaceX { get => _faceX; set => Set(ref _faceX, value); }

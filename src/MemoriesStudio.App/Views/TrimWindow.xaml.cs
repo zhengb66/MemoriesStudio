@@ -38,6 +38,11 @@ public partial class TrimWindow : Window
     private int _initAttempts;
     private DateTime _initRetryAt = DateTime.MinValue;
 
+    // 播放自愈：libvlc 的 Pause/Play 是异步的，快速"停止→播放"或在媒体末尾 Play() 会被吞掉。
+    // _playRetry 限次重发，避免媒体真出错时无限重试。
+    private int _playRetry;
+    private DateTime _playRetryAt = DateTime.MinValue;
+
     public double InPoint => _in;
     public double OutPoint => _out;
 
@@ -159,6 +164,29 @@ public partial class TrimWindow : Window
             return;
         }
 
+        // 媒体自然播到片尾后 libvlc 进入 Ended，此时 Play() 不会重启。
+        // 用户仍在期望播放（_playing=true）时，主动从起点重建媒体续播。
+        if (_playing)
+        {
+            var st = _player.State;
+            if (st == LibVLCSharp.Shared.VLCState.Ended)
+            {
+                Log("state=Ended while playing -> restart at in");
+                RestartPlaybackAt(_in);
+                return;
+            }
+            // Pause/Play 竞态导致"图标是暂停但没在播"：限次补一次 Play。
+            if (!_player.IsPlaying && st != LibVLCSharp.Shared.VLCState.Buffering &&
+                st != LibVLCSharp.Shared.VLCState.Opening && DateTime.UtcNow >= _playRetryAt &&
+                _playRetry < 3)
+            {
+                _playRetry++;
+                _playRetryAt = DateTime.UtcNow.AddMilliseconds(300);
+                Log($"play noop retry #{_playRetry} state={st}");
+                try { _player.Play(); } catch { }
+            }
+        }
+
         long ms;
         try { ms = _player.Time; } catch { return; }
         if (ms < 0) return;
@@ -271,20 +299,58 @@ public partial class TrimWindow : Window
 
         _autoPausePending = false;
         _initTarget = -1;
+        _playRetry = 0;
+        _playRetryAt = DateTime.UtcNow.AddMilliseconds(500);
         try { _player.Mute = false; } catch { }
 
         // 位置不在区间内（例如停在片尾）时，从起点起播
         var t = Range.Position;
-        if (t < _in - 0.05 || t > _out - 0.05) SeekTo(_in);
+        if (t < _in - 0.05 || t > _out - 0.05)
+        {
+            SeekTo(_in);
+            ShowPosition(_in);
+        }
 
         _playing = true;
-        try { _player.Play(); } catch { }
+        // libvlc 在 Ended/Stopped 状态下 Play() 是空操作：必须重建 Media 才能真正起播。
+        // 这正是"设完首/尾帧、停住后再点播放没反应"的根因。
+        if (_player.State is LibVLCSharp.Shared.VLCState.Ended or LibVLCSharp.Shared.VLCState.Stopped
+            or LibVLCSharp.Shared.VLCState.NothingSpecial)
+        {
+            RestartPlaybackAt(Range.Position);
+        }
+        else
+        {
+            try { _player.Play(); } catch { }
+        }
         SetPlayIcon(true);
+    }
+
+    /// <summary>从指定位置重建媒体并播放（UI 线程调用，Media 构造/Play 走后台避免卡 UI）。</summary>
+    private void RestartPlaybackAt(double seconds)
+    {
+        var target = Math.Clamp(seconds, _in, Math.Max(_in, _out - 0.05));
+        Log($"restart media -> {target:0.00}");
+        Task.Run(() =>
+        {
+            if (_closed) return;
+            try
+            {
+                var media = new Media(_libvlc, _clip.SourcePath, FromType.FromPath);
+                if (target > 0.05)
+                    media.AddOption($":start-time={target.ToString("0.###", CultureInfo.InvariantCulture)}");
+                try { _player.Mute = false; } catch { }
+                _player.Play(media);
+                Log("restart media play issued");
+            }
+            catch (Exception ex) { Log("restart media error: " + ex.Message); }
+        });
     }
 
     private void PausePlayback()
     {
         _playing = false;
+        _playRetry = 0;
         try { if (_player.IsPlaying) _player.Pause(); } catch { }
         SetPlayIcon(false);
     }
@@ -299,11 +365,27 @@ public partial class TrimWindow : Window
         ShowPosition(t);
     }
 
+    /// <summary>自检用：模拟把终点拖到指定秒（不触发播放）。</summary>
+    public void SetOutPointForTest(double seconds)
+    {
+        _autoPausePending = false;
+        _initTarget = -1;
+        _out = Math.Clamp(seconds, _in + 0.3, _sourceDuration);
+        RefreshRangeUi(keepPosition: true);
+    }
+
+    /// <summary>自检用：模拟点击"停止"（暂停并回到起点）。</summary>
+    public void StopForTest() => OnStop(this, new RoutedEventArgs());
+
+    /// <summary>自检播放状态：是否处于用户期望的播放中。</summary>
+    public bool IsPlayingForTest => _playing && _player.IsPlaying;
+
     private void OnStop(object sender, RoutedEventArgs e)
     {
         _playing = false;
         _autoPausePending = false;
         _initTarget = -1;
+        _playRetry = 0;
         try { if (_player.IsPlaying) _player.Pause(); } catch { }
         SetPlayIcon(false);
 

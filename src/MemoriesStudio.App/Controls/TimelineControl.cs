@@ -27,6 +27,7 @@ public sealed class TimelineControl : FrameworkElement
     private Point _pressPos;
     private Clip? _pressClip;
     private Clip? _hover;
+    private Clip? _anchorClip;   // Shift 连选的锚点（上一次单选/首选的片段）
 
     // 拖动排序状态
     private System.Collections.Generic.List<Clip> _dragBlock = new();
@@ -131,6 +132,7 @@ public sealed class TimelineControl : FrameworkElement
         {
             SelectedClips.RemoveWhere(c => !Project.Clips.Contains(c));
             if (Selected is not null && !Project.Clips.Contains(Selected)) Selected = null;
+            if (_anchorClip is not null && !Project.Clips.Contains(_anchorClip)) _anchorClip = null;
         }
         InvalidateMeasure();
         InvalidateVisual();
@@ -143,6 +145,7 @@ public sealed class TimelineControl : FrameworkElement
         foreach (var c in clips) SelectedClips.Add(c);
         Selected = primary ?? SelectedClips.FirstOrDefault();
         if (Selected is not null) SelectedClips.Add(Selected);
+        _anchorClip = Selected;
         InvalidateVisual();
     }
 
@@ -189,10 +192,31 @@ public sealed class TimelineControl : FrameworkElement
             : $"OKUNCHANGED orig={origIndex} drop={dropIndex} newIndex={newIndex} count={project.Clips.Count}";
     }
 
+    /// <summary>自检：模拟以 from 为锚点、Shift 点击 to 的连选，返回选中数量描述。</summary>
+    public string TestShiftSelect(int from, int to)
+    {
+        var project = Project;
+        if (project is null || project.Clips.Count == 0) return "FAIL no-project";
+        if (from < 0 || to < 0 || from >= project.Clips.Count || to >= project.Clips.Count)
+            return $"FAIL out-of-range count={project.Clips.Count}";
+        _anchorClip = project.Clips[from];
+        var hit = project.Clips[to];
+        var start = project.Clips.IndexOf(_anchorClip);
+        var end = project.Clips.IndexOf(hit);
+        SelectedClips.Clear();
+        var lo = Math.Min(start, end);
+        var hi = Math.Max(start, end);
+        for (var i = lo; i <= hi; i++) SelectedClips.Add(project.Clips[i]);
+        Selected = hit;
+        InvalidateVisual();
+        return $"OK from={from} to={to} count={SelectedClips.Count} expect={hi - lo + 1}";
+    }
+
     public void ClearSelection()
     {
         SelectedClips.Clear();
         Selected = null;
+        _anchorClip = null;
         InvalidateVisual();
     }
 
@@ -231,6 +255,7 @@ public sealed class TimelineControl : FrameworkElement
         SelectedClips.Clear();
         SelectedClips.Add(clip);
         Selected = clip;
+        _anchorClip = clip;
         EnsureClipOnScreen(index);
         InvalidateVisual();
 
@@ -533,25 +558,49 @@ public sealed class TimelineControl : FrameworkElement
         _pressPos = p;
 
         var ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+        var shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
         var hitClip = HitTestClip(p);
+        var project = Project;
 
         if (hitClip is not null)
         {
-            if (ctrl)
+            if (shift && project is not null)
+            {
+                // Shift 连选：以锚点为起点，选中锚点到本次点击之间的整段（含两端）。
+                // 锚点不存在（首次即按住 Shift）时退化为单选并把本次点击设为锚点。
+                var end = project.Clips.IndexOf(hitClip);
+                var start = _anchorClip is not null ? project.Clips.IndexOf(_anchorClip) : -1;
+                SelectedClips.Clear();
+                if (start < 0 || end < 0)
+                {
+                    SelectedClips.Add(hitClip);
+                }
+                else
+                {
+                    var lo = Math.Min(start, end);
+                    var hi = Math.Max(start, end);
+                    for (var i = lo; i <= hi; i++) SelectedClips.Add(project.Clips[i]);
+                }
+                Selected = hitClip;
+                _anchorClip ??= hitClip;
+            }
+            else if (ctrl)
             {
                 if (!SelectedClips.Remove(hitClip)) SelectedClips.Add(hitClip);
                 Selected = SelectedClips.Contains(hitClip) ? hitClip : SelectedClips.LastOrDefault();
+                _anchorClip = hitClip;
             }
             else
             {
                 SelectedClips.Clear();
                 SelectedClips.Add(hitClip);
                 Selected = hitClip;
+                _anchorClip = hitClip;
             }
             SelectionChanged?.Invoke(this, Selected);
             SelectionSetChanged?.Invoke(this, EventArgs.Empty);
         }
-        else if (!ctrl)
+        else if (!ctrl && !shift)
         {
             ClearSelection();
             SelectionChanged?.Invoke(this, null);

@@ -175,7 +175,10 @@ public sealed class FaceDetector
         catch { }
     }
 
-    public FocusResult Detect(string imagePath)
+    public FocusResult Detect(string imagePath) => Detect(imagePath, 0);
+
+    /// <summary>检测人脸；rotation 为片段的用户顺时针旋转，先把像素转正再检测，坐标才与预览一致。</summary>
+    public FocusResult Detect(string imagePath, int rotation)
     {
         FocusResult WithDiag(FocusResult r, string method)
             => r with { Method = method, Status = LastDnnStatus };
@@ -191,10 +194,27 @@ public sealed class FaceDetector
                     Method: "broken", Status: "文件损坏，无法解码（导出将用灰帧替代）");
             }
 
-            using var src = LoadAsMat(imagePath);
-            if (src is null || src.Empty()) return new FocusResult(0.5, 0.45, false, 0, Method: "none");
+            using var raw = LoadAsMat(imagePath);
+            if (raw is null || raw.Empty()) return new FocusResult(0.5, 0.45, false, 0, Method: "none");
 
-            using var work = Downscale(src, 1024);
+            Mat? rotated = null;
+            var src = raw;
+            if (rotation is 90 or 180 or 270)
+            {
+                rotated = new Mat();
+                var flag = rotation switch
+                {
+                    90 => RotateFlags.Rotate90Clockwise,
+                    180 => RotateFlags.Rotate180,
+                    _ => RotateFlags.Rotate90Counterclockwise,
+                };
+                Cv2.Rotate(raw, rotated, flag);
+                src = rotated;
+            }
+
+            using (rotated)
+            using (var work = Downscale(src, 1024))
+            {
 
             var byYuNet = DetectWithYuNet(work);
             if (byYuNet is not null) { LastMethod = "yunet"; return WithDiag(byYuNet, "yunet"); }
@@ -217,6 +237,7 @@ public sealed class FaceDetector
             LastMethod = "saliency";
             var sal = DetectBySaliency(work) ?? new FocusResult(0.5, 0.45, false, 0);
             return WithDiag(sal, "saliency");
+            }
         }
         catch (Exception ex)
         {

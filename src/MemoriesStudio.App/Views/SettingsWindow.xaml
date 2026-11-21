@@ -28,10 +28,30 @@
         <TextBlock Text="分辨率决定成片清晰度；4K 导出更慢、文件更大。帧率建议与素材一致（手机视频多为 30 或 60）。"
                    TextWrapping="Wrap" Foreground="{StaticResource TextDimBrush}" FontSize="10.5" Margin="0,0,0,16"/>
 
-        <TextBlock Text="背景音乐" Style="{StaticResource SectionTitle}"/>
+        <Grid Margin="0,0,0,6">
+            <TextBlock Text="背景音乐" Style="{StaticResource SectionTitle}" Margin="0" VerticalAlignment="Center"/>
+            <TextBlock x:Name="TxtMusicTotal" Text="" HorizontalAlignment="Right" VerticalAlignment="Center"
+                       Foreground="{StaticResource TextDimBrush}" FontSize="10.5"/>
+        </Grid>
         <ListBox x:Name="LstMusic" Height="110" Background="#1B1D24" BorderBrush="{StaticResource BorderBrush}"
                  BorderThickness="1" FontSize="11" Foreground="#C9CDD6" Margin="0,0,0,8"
-                 ScrollViewer.HorizontalScrollBarVisibility="Auto"/>
+                 ScrollViewer.HorizontalScrollBarVisibility="Auto">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{Binding Name}"
+                                   TextTrimming="CharacterEllipsis" ToolTip="{Binding Path}"
+                                   VerticalAlignment="Center"/>
+                        <TextBlock Grid.Column="1" Text="{Binding Duration}" Margin="12,0,0,0"
+                                   Foreground="{StaticResource TextDimBrush}" VerticalAlignment="Center"/>
+                    </Grid>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
         <UniformGrid Columns="3" Margin="0,0,0,6">
             <Button Content="添加音乐…" Style="{StaticResource Btn}" Margin="0,0,4,0" Click="OnAddMusic"/>
             <Button Content="移除所选" Style="{StaticResource Btn}" Margin="4,0,4,0" Click="OnRemoveMusic"/>

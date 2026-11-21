@@ -28,6 +28,8 @@ public partial class MainWindow : Window
 
     private ProjectFile _project = new();
     private readonly ObservableCollection<MediaAsset> _assets = new();
+    // 手动导入时本批新增的素材（打开工程重建不记），用于导入后自动选中
+    private readonly List<MediaAsset> _lastImported = new();
 
     // 时间轴缩略图缓存：按需加载 + LRU 上限（素材上千时不至于把内存吃光）
     private readonly Services.LruCache<string, BitmapSource> _thumbCache = new(600);
@@ -235,6 +237,7 @@ public partial class MainWindow : Window
 
         var added = 0;
         var skipped = 0;
+        _lastImported.Clear();
         // 去重索引：原本每个文件都扫描整个素材库（1290×1290/2 次比较），打开大工程时明显卡顿。
         // 用 HashSet 一次建成，逐文件 O(1) 判定。
         var existing = new HashSet<string>(_assets.Select(a => a.Path), StringComparer.OrdinalIgnoreCase);
@@ -249,7 +252,9 @@ public partial class MainWindow : Window
             }
 
             if (added == 0 && undoable) PushUndo();   // 第一批真正加入前记录（全跳过则不记）
-            _assets.Add(new MediaAsset { Path = f, Kind = kind.Value });
+            var asset = new MediaAsset { Path = f, Kind = kind.Value };
+            _assets.Add(asset);
+            if (undoable) _lastImported.Add(asset);   // 仅用户手动导入自动选中；打开工程重建不选中
             added++;
         }
 
@@ -267,10 +272,23 @@ public partial class MainWindow : Window
         if (healthCheck)
             _ = CheckNewImagesHealthAsync();
 
-        // 导入后取消素材库选中：WPF 绑定集合时默认会把新加的第一项设为当前项并高亮，
-        // 用户往往只是想先把素材收进库、再逐个加入时间轴，残留高亮容易误操作（Del/加入选中）。
+        // 手动导入后自动选中本批新增素材并滚动到可见，方便紧接着「导入时间轴」或批量操作。
+        // 打开工程重建素材库（undoable=false）时不选中——那不是用户本次导入的内容。
+        // 全部重复被跳过时 _lastImported 为空，保持无选中（旧行为）。
         AssetsList.SelectedItems.Clear();
-        AssetsList.SelectedItem = null;
+        if (_lastImported.Count > 0)
+        {
+            // 先设 SelectedItem 作锚点，再补齐 SelectedItems（多选模式的 setter 会清掉已有选中）
+            AssetsList.SelectedItem = _lastImported[0];
+            foreach (var a in _lastImported)
+                if (!AssetsList.SelectedItems.Contains(a)) AssetsList.SelectedItems.Add(a);
+            AssetsList.UpdateLayout();
+            AssetsList.ScrollIntoView(_lastImported[0]);
+        }
+        else
+        {
+            AssetsList.SelectedItem = null;
+        }
 
         SetStatus(audioCount > 0
             ? $"已导入 {added} 个素材（{audioCount} 个音乐文件未收：请用「设置 → 添加音乐」）· 双击加入时间轴，或直接拖到时间轴上插入"
@@ -623,7 +641,7 @@ public partial class MainWindow : Window
         await _detectGate.WaitAsync();
         try
         {
-            var result = await Task.Run(() => _faceDetector.Detect(clip.SourcePath));
+            var result = await Task.Run(() => _faceDetector.Detect(clip.SourcePath, clip.Rotation));
             await Dispatcher.InvokeAsync(() => ApplyFaceResult(clip, result));
         }
         catch { }
@@ -673,7 +691,7 @@ public partial class MainWindow : Window
             await gate.WaitAsync();
             try
             {
-                var r = await Task.Run(() => _faceDetector.Detect(clip.SourcePath));
+                var r = await Task.Run(() => _faceDetector.Detect(clip.SourcePath, clip.Rotation));
                 lock (results) results.Add((clip, r));
             }
             catch { }
@@ -742,7 +760,7 @@ public partial class MainWindow : Window
                     var clip = pending[i];
                     try
                     {
-                        var result = await Task.Run(() => _faceDetector.Detect(clip.SourcePath));
+                        var result = await Task.Run(() => _faceDetector.Detect(clip.SourcePath, clip.Rotation));
                         if (_faceScanCts.IsCancellationRequested) { cancelled = true; return; }
                         await Dispatcher.InvokeAsync(() =>
                         {
@@ -976,8 +994,17 @@ public partial class MainWindow : Window
         SeekSlider.Maximum = Math.Max(0.1, _project.TotalDuration);
         _suppressUi = false;
         TxtTimelineInfo.Text = $"{_project.Clips.Count} 个片段 · {_project.TotalDuration:0.0}s";
+        TxtTotalBadge.Text = $"总时长 {FormatClock(_project.TotalDuration)}";
         PreviewHint.Visibility = _project.Clips.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         UpdateTransportUi();
+    }
+
+    private static string FormatClock(double seconds)
+    {
+        var ts = TimeSpan.FromSeconds(Math.Max(0, seconds));
+        return ts.TotalHours >= 1
+            ? $"{(int)ts.TotalHours}:{ts.Minutes:00}:{ts.Seconds:00}"
+            : $"{ts.Minutes:00}:{ts.Seconds:00}";
     }
 
     private void RefreshInspector()
@@ -1012,6 +1039,7 @@ public partial class MainWindow : Window
                 var isVideo = c.Kind == MediaKind.Video;
                 DurPanel.Visibility = isVideo ? Visibility.Collapsed : Visibility.Visible;
                 TrimPanel.Visibility = isVideo ? Visibility.Visible : Visibility.Collapsed;
+                BtnClipRotate.Visibility = c.IsImage ? Visibility.Visible : Visibility.Collapsed;
                 if (isVideo)
                 {
                     if (c.SourceDuration > 0.3)
@@ -1429,6 +1457,31 @@ public partial class MainWindow : Window
         SetStatus("片段顺序已调整");
     }
 
+    /// <summary>图片顺时针旋转 90°：换源宽高、清缓存、重检人脸（旋转会改变取景），刷新预览。</summary>
+    private void OnRotateClip(object sender, RoutedEventArgs e)
+    {
+        if (_selected is not { } clip || !clip.IsImage) return;
+
+        PushUndo();
+        MarkDirty();
+        clip.Rotate90();
+
+        _previewCache.Clear();
+        _previewLoading.Remove(clip.Id);
+        // 缩略图按路径缓存，旋转后需丢弃旧图（LruCache 无单项 Remove，整表清空代价可忽略）
+        _thumbCache.Clear();
+
+        // 人脸检测按原始像素做，旋转 90° 后取景坐标要重算
+        clip.MotionV = 0;
+        clip.FaceHV = 0;
+        _ = DetectFaceAsync(clip);
+
+        Timeline.Refresh();
+        RefreshInspector();
+        RenderFrame();
+        SetStatus($"已旋转 90°（当前 {clip.Rotation}°）");
+    }
+
     private void OnRemoveClip(object sender, RoutedEventArgs e)
     {
         if (_selected is null) return;
@@ -1470,6 +1523,7 @@ public partial class MainWindow : Window
         _project.Height = dlg.HeightOut;
         _project.Fps = dlg.FpsOut;
         TxtResBadge.Text = $"{_project.Width}×{_project.Height} · {_project.Fps}fps";
+        TxtTotalBadge.Text = $"总时长 {FormatClock(_project.TotalDuration)}";
         SetStatus(dlg.MusicChanged
             ? $"背景音乐已更新：{_project.MusicPaths.Count} 首（导出时循环播放、只配在照片段、自动淡入淡出）"
             : $"输出设置：{_project.Width}×{_project.Height} · {_project.Fps}fps");
@@ -1830,10 +1884,11 @@ public partial class MainWindow : Window
         _previewLoading.Add(clip.Id);
         var path = clip.SourcePath;
         var id = clip.Id;
+        var rotation = clip.Rotation;
 
         _ = Task.Run(() =>
         {
-            var bmp = LoadPhotoBitmap(path, 1280);
+            var bmp = LoadPhotoBitmap(path, 1280, rotation);
             if (bmp is null)
             {
                 Dispatcher.BeginInvoke(() => _previewLoading.Remove(id));
@@ -1855,7 +1910,7 @@ public partial class MainWindow : Window
     /// 解码整张照片（不解裁切）：竖幅照片的上下内容必须在，取景窗才能滑动。
     /// 按长边限制尺寸，够画布预览清晰即可。
     /// </summary>
-    private static BitmapSource? LoadPhotoBitmap(string path, int maxLongSide)
+    private static BitmapSource? LoadPhotoBitmap(string path, int maxLongSide, int rotation = 0)
     {
         try
         {
@@ -1874,6 +1929,14 @@ public partial class MainWindow : Window
             BitmapSource bmp = bi;
             var orientation = MediaProbe.GetOrientation(path);
             if (orientation != 1) bmp = MediaProbe.ApplyOrientation(bmp, orientation);
+            // 用户旋转叠加在 EXIF 方向之上（顺时针）
+            if (rotation != 0)
+            {
+                var r = new TransformedBitmap(bmp, new RotateTransform(rotation,
+                    bmp.PixelWidth / 2.0, bmp.PixelHeight / 2.0));
+                r.Freeze();
+                bmp = r;
+            }
             bmp.Freeze();
 
             // 常见坑：JPG 常带 72dpi 元数据，DIP 尺寸≠像素尺寸，会让 Image 的拉伸/裁切计算错乱。
@@ -2268,6 +2331,7 @@ public partial class MainWindow : Window
         Timeline.Project = _project;
         Timeline.Refresh();
         TxtResBadge.Text = $"{_project.Width}×{_project.Height} · {_project.Fps}fps";
+        TxtTotalBadge.Text = $"总时长 {FormatClock(_project.TotalDuration)}";
         _project.MigrateLegacyMusic();
         RefreshAfterTimelineEdit();
         RefreshInspector();
@@ -2505,9 +2569,12 @@ public partial class MainWindow : Window
                 foreach (var c in _project.Clips.Where(
                              x => string.Equals(x.SourcePath, sample.SourcePath, StringComparison.OrdinalIgnoreCase)))
                 {
-                    if (c.SourceWidth == probe.Width && c.SourceHeight == probe.Height) continue;
-                    c.SourceWidth = probe.Width;
-                    c.SourceHeight = probe.Height;
+                    // 用户旋转 90°/270° 时源宽高已交换，归一化要按旋转后的尺寸比对/回填。
+                    var wantW = c.Rotation is 90 or 270 ? probe.Height : probe.Width;
+                    var wantH = c.Rotation is 90 or 270 ? probe.Width : probe.Height;
+                    if (c.SourceWidth == wantW && c.SourceHeight == wantH) continue;
+                    c.SourceWidth = wantW;
+                    c.SourceHeight = wantH;
                     // 自动运镜当初按错误的横幅尺寸算过，标记重算；手动设定的运镜保持不动。
                     if (c.Motion == MotionStyle.Auto) c.MotionV = 0;
                     fixedCount++;
@@ -2670,13 +2737,17 @@ public partial class MainWindow : Window
     /// <summary>自检访问器：素材库列表（核对导入后的类型/路径）。</summary>
     public IReadOnlyList<MediaAsset> AssetsForTest => _assets.ToList();
 
-    /// <summary>自检：导入素材后素材库应无选中项，并整窗截图（核对属性页分组顺序）。</summary>
+    /// <summary>自检：导入素材后素材库应自动选中刚导入项，并整窗截图（核对属性页分组顺序）。</summary>
     public async Task<string> ImportSelectionForTest(string path, string outPath)
     {
         await ImportFilesAsync(new[] { path });
         await Task.Delay(400);
         var count = AssetsList.SelectedItems.Count;
-        var selectedItemNull = AssetsList.SelectedItem is null;
+        var selected = AssetsList.SelectedItem as MediaAsset;
+        // 刚导入项即 _lastImported[0]（手动导入），校验路径一致
+        var expectPath = _lastImported.Count > 0 ? _lastImported[0].Path : null;
+        var selectedIsNew = expectPath is not null && selected is not null &&
+                            string.Equals(selected.Path, expectPath, StringComparison.OrdinalIgnoreCase);
 
         // 选中首个片段（不滚动属性面板），让截图展示顶部分组顺序
         if (_project.Clips.Count == 0 && _assets.Count > 0)
@@ -2699,11 +2770,34 @@ public partial class MainWindow : Window
         enc.Frames.Add(BitmapFrame.Create(rtb));
         using (var fs = File.Create(outPath)) enc.Save(fs);
 
-        return $"{(count == 0 && selectedItemNull ? "OK" : "FAIL")} " +
-               $"assets={_assets.Count} selectedCount={count} selectedItemNull={selectedItemNull} " +
+        return $"{(count >= 1 && count == _lastImported.Count && selectedIsNew ? "OK" : "FAIL")} " +
+               $"assets={_assets.Count} selectedCount={count} expect={_lastImported.Count} selectedIsNew={selectedIsNew} " +
                $"clipOpsY={BtnClipUp.TranslatePoint(new Point(0, 0), this).Y:0} " +
                $"faceY={FacePanel.TranslatePoint(new Point(0, 0), this).Y:0}";
     }
+    /// <summary>自检：批量导入多份素材后，素材库应全部选中本批新增项（路径以 | 分隔）。</summary>
+    public async Task<string> ImportMultiSelectForTest(string pathsArg, string outPath)
+    {
+        var paths = pathsArg.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        await ImportFilesAsync(paths);
+        await Task.Delay(400);
+        var expect = _lastImported.Count;
+        var selectedPaths = AssetsList.SelectedItems.Cast<MediaAsset>()
+            .Select(a => a.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var expectPaths = _lastImported.Select(a => a.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var allSelected = expect > 0 && expectPaths.SetEquals(selectedPaths);
+
+        var w = (int)Math.Max(2, ActualWidth);
+        var h = (int)Math.Max(2, ActualHeight);
+        var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(this);
+        var enc = new PngBitmapEncoder();
+        enc.Frames.Add(BitmapFrame.Create(rtb));
+        using (var fs = File.Create(outPath)) enc.Save(fs);
+
+        return $"{(allSelected ? "OK" : "FAIL")} expect={expect} selected={AssetsList.SelectedItems.Count} allSelected={allSelected}";
+    }
+
     /// <summary>自检：素材库多选加入时间轴后，选中状态应被清空。</summary>
     public async Task<string> AddSelectionForTest(string projectPath, string outPath)
     {
@@ -2776,6 +2870,12 @@ public partial class MainWindow : Window
     }
 
     /// <summary>自动化自检：打开既有工程 → 重建素材库 → 验证时间轴与预览。</summary>
+    /// <summary>自检：返回右上角总时长徽标文本。</summary>
+    public string TotalBadgeForTest() => TxtTotalBadge.Text;
+
+    /// <summary>自检：返回「导入素材 / 导入时间轴」两个按钮的文本。</summary>
+    public string ImportButtonsForTest() => $"{BtnImport2.Content}|{BtnAddSelectedToTimeline.Content}";
+
     public async Task OpenProjectForTest(string path)
     {
         var loaded = ProjectStore.Load(path);
@@ -2917,6 +3017,31 @@ public partial class MainWindow : Window
     /// 自检：选中时间轴第 index 个片段（1 起），验证素材库自动跟随定位的效果，
     /// 返回素材在素材库视口中的纵向位置（应接近 viewport 的一半），并整窗截图。
     /// </summary>
+    /// <summary>自检：图片旋转 90° ×N，核对角度与源宽高交换。</summary>
+    public string RotateForTest(int clipNo, int times)
+    {
+        var clip = _project.Clips[clipNo - 1];
+        if (!clip.IsImage) return "FAIL not-image";
+        var (w, h) = (clip.SourceWidth, clip.SourceHeight);
+        for (var i = 0; i < times; i++) clip.Rotate90();
+        var swapped = times % 2 == 1;
+        var okW = clip.SourceWidth == (swapped ? h : w);
+        var okH = clip.SourceHeight == (swapped ? w : h);
+        var okR = clip.Rotation == (times * 90) % 360;
+        BtnClipRotate.Visibility = Visibility.Visible;
+        return $"{(okW && okH && okR ? "OK" : "FAIL")} rot={clip.Rotation} src={clip.SourceWidth}x{clip.SourceHeight} " +
+               $"expect={(swapped ? h : w)}x{(swapped ? w : h)}";
+    }
+
+    /// <summary>自检：Shift 连选（from/to 为 0 起片段序号）。</summary>
+    public string ShiftSelectForTest(int from, int to)
+    {
+        var before = Timeline.SelectedClips.Count;
+        var result = Timeline.TestShiftSelect(from, to);
+        RefreshInspector();
+        return $"{result} before={before} selected={Timeline.SelectedClips.Count}";
+    }
+
     public string RevealForTest(int index1, string outPath)
     {
         if (_project.Clips.Count == 0) return "FAIL no-clips";
@@ -3643,6 +3768,7 @@ public partial class MainWindow : Window
         if (_thumbPending.Add(path))
         {
             var p = path;
+            var rot = clip.Rotation;
             _ = Task.Run(() =>
             {
                 BitmapSource? bmp = null;
@@ -3657,6 +3783,14 @@ public partial class MainWindow : Window
                     bi.EndInit();
                     bi.Freeze();
                     bmp = bi;
+                    // 图片片段的用户旋转要反映到时间轴缩略图（与预览/导出一致）
+                    if (rot != 0)
+                    {
+                        var r = new TransformedBitmap(bmp, new RotateTransform(rot,
+                            bmp.PixelWidth / 2.0, bmp.PixelHeight / 2.0));
+                        r.Freeze();
+                        bmp = r;
+                    }
                 }
                 catch { }
                 Dispatcher.BeginInvoke(() =>

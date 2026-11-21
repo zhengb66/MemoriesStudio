@@ -549,7 +549,7 @@ public sealed class ExportEngine
             var reDetected = false;
             if (c.FaceHV < 2 && File.Exists(c.SourcePath))
             {
-                var r = new FaceDetector().Detect(MediaSource.Resolve(c.SourcePath));
+                var r = new FaceDetector().Detect(MediaSource.Resolve(c.SourcePath), c.Rotation);
                 c.FaceX = r.X;
                 c.FaceY = r.Y;
                 c.FaceSY = Math.Clamp(r.Y, 0.01, 0.99);
@@ -765,7 +765,8 @@ public sealed class ExportEngine
             var capFx = CaptionFilters(c, H, captionFiles);
 
             // 照片输入只有 1 帧：缩放/裁切后交给 zoompan，由 d=frames 铺满整段
-            var photoPrefix = $"[{photoInput[i]}:v]";
+            // 用户旋转放在最前面（EXIF 自动转正之后），后续 scale/crop/cover 才按旋转后的宽高计算。
+            var photoPrefix = $"[{photoInput[i]}:v]" + RotationFilter(c.Rotation);
 
             // 非首块的首片段：zoompan 按完整帧数铺满后再裁掉前 td 秒（上一块已渲染），
             // 表达式进度用 on+firstFrames 平移，运动与上一块尾部无缝衔接
@@ -1044,6 +1045,15 @@ public sealed class ExportEngine
         }
         return slots;
     }
+
+    /// <summary>用户旋转 → ffmpeg 滤镜（顺时针；叠加在 ffmpeg 自动 EXIF 转正之后）。</summary>
+    private static string RotationFilter(int rotation) => rotation switch
+    {
+        90  => "transpose=clock,",
+        180 => "transpose=clock,transpose=clock,",
+        270 => "transpose=cclock,",
+        _   => "",
+    };
 
     private static string LevelFor(int w, int h, int fps)
     {

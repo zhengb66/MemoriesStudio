@@ -307,6 +307,65 @@ public partial class App : Application
             return;
         }
 
+        // 图片旋转自检：MemoriesStudio.exe --rotate-test <工程> <图片片段序号1起> <旋转次数>
+        if (e.Args.Length >= 4 && e.Args[0] == "--rotate-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var rtWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = rtWindow;
+            rtWindow.Show();
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    await rtWindow.OpenProjectForTest(e.Args[1]);
+                    await Task.Delay(400);
+                    info = rtWindow.RotateForTest(
+                        int.Parse(e.Args[2], CultureInfo.InvariantCulture),
+                        int.Parse(e.Args[3], CultureInfo.InvariantCulture));
+                }
+                catch (Exception ex) { info = "ERROR " + ex.Message; }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_rotate.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
+        // Shift 连选自检：MemoriesStudio.exe --shift-select-test <工程> <起点序号1起> <终点序号1起>
+        if (e.Args.Length >= 4 && e.Args[0] == "--shift-select-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var ssWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = ssWindow;
+            ssWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    await ssWindow.OpenProjectForTest(e.Args[1]);
+                    await Task.Delay(400);
+                    info = ssWindow.ShiftSelectForTest(
+                        int.Parse(e.Args[2], CultureInfo.InvariantCulture) - 1,
+                        int.Parse(e.Args[3], CultureInfo.InvariantCulture) - 1);
+                }
+                catch (Exception ex) { info = "ERROR " + ex.Message; }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_shiftselect.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
         // 撤销/重做 + Ctrl+S 自检：MemoriesStudio.exe --undo-test <图1> <图2> <输出png>
         if (e.Args.Length >= 4 && e.Args[0] == "--undo-test")
         {
@@ -359,6 +418,35 @@ public partial class App : Application
                 finally
                 {
                     File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_importsel.log"),
+                        $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
+        // 批量导入多选自检：MemoriesStudio.exe --import-multisel-test <路径1|路径2|...> <输出png>
+        if (e.Args.Length >= 3 && e.Args[0] == "--import-multisel-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var imWindow = new Views.MainWindow { SuppressCloseConfirm = true };
+            MainWindow = imWindow;
+            imWindow.Show();
+
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var info = "";
+                try
+                {
+                    info = await imWindow.ImportMultiSelectForTest(e.Args[1], e.Args[2]);
+                }
+                catch (Exception ex)
+                {
+                    info = "ERROR " + ex.Message;
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_importmultisel.log"),
                         $"RESULT {info}\r\ntime={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
                     Shutdown(0);
                 }
@@ -589,6 +677,76 @@ public partial class App : Application
             return;
         }
 
+        // 时长徽标自检：MemoriesStudio.exe --music-badge-test <音频路径> <片段秒数>
+        // 验证：设置窗口音乐项时长异步回填、主窗口右上角总时长徽标随片段数刷新
+        if (e.Args.Length >= 3 && e.Args[0] == "--music-badge-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var musicPath = e.Args[1];
+            var clipSeconds = double.TryParse(e.Args[2], out var cs) ? cs : 3.0;
+            Dispatcher.InvokeAsync(async () =>
+            {
+                var log = new StringBuilder();
+                try
+                {
+                    var proj = new ProjectFile();
+                    proj.MusicPaths.Add(musicPath);
+                    var clip = new Clip { SourcePath = musicPath, Kind = MediaKind.Image, Duration = clipSeconds };
+                    proj.Clips.Add(clip);
+
+                    var settings = new Views.SettingsWindow(proj)
+                    {
+                        WindowStartupLocation = WindowStartupLocation.Manual, Left = -20000, Top = -20000
+                    };
+                    settings.Show();
+                    settings.UpdateLayout();
+                    // 等 LibVLC 异步探测回填（最多 12 秒）
+                    for (var i = 0; i < 95; i++)
+                    {
+                        await Task.Delay(200);
+                        if (!string.IsNullOrEmpty(settings.MusicDurationForTest())) break;
+                    }
+                    var dur = settings.MusicDurationForTest();
+                    log.AppendLine($"musicDuration={dur}");
+                    var durOk = dur is "00:07" or "00:08" or "0:07" or "0:08";   // 7 秒测试音频，LibVLC 解码可能报 7 或 8
+                    log.AppendLine($"musicOk={(durOk ? "OK" : "FAIL")}");
+                    var musicTotal = settings.MusicTotalForTest();
+                    log.AppendLine($"musicTotal={musicTotal}");
+                    var musicTotalOk = musicTotal.Contains("00:08") || musicTotal.Contains("00:07");
+                    log.AppendLine($"musicTotalOk={(musicTotalOk ? "OK" : "FAIL")}");
+                    settings.Close();
+
+                    var projPath = Path.Combine(Path.GetTempPath(), "memories_badge_test.msproj");
+                    ProjectStore.Save(proj, projPath);
+                    var main = new Views.MainWindow();
+                    await main.OpenProjectForTest(projPath);
+                    await Task.Delay(150);
+                    var badge = main.TotalBadgeForTest();
+                    log.AppendLine($"totalBadge={badge}");
+                    var badgeOk = badge.Contains("0:03") || badge.Contains("0:04");
+                    log.AppendLine($"badgeOk={(badgeOk ? "OK" : "FAIL")}");
+                    var importBtns = main.ImportButtonsForTest();
+                    log.AppendLine($"importButtons={importBtns}");
+                    var importOk = importBtns == "导入素材|导入时间轴";
+                    log.AppendLine($"importOk={(importOk ? "OK" : "FAIL")}");
+                    main.Close();
+                }
+                catch (Exception ex)
+                {
+                    log.AppendLine("ERROR " + ex);
+                }
+                finally
+                {
+                    var text = log.ToString();
+                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "memories_music_badge_test.log"),
+                        "RESULT=" + (text.Contains("FAIL") || text.Contains("ERROR") ? "FAIL" : "OK")
+                        + "\r\n" + text + $"time={DateTime.Now:HH:mm:ss}\r\n", Encoding.UTF8);
+                    Shutdown(0);
+                }
+            }, DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
         // 关于对话框自检：MemoriesStudio.exe --about-test <输出目录>
         // 离屏渲染「设置窗口（含左下角关于按钮）」与「关于对话框」两图，便于核对排版
         if (e.Args.Length >= 2 && e.Args[0] == "--about-test")
@@ -692,6 +850,14 @@ public partial class App : Application
 
             RunTrimTest(e.Args[1], e.Args.Length >= 3
                 ? double.Parse(e.Args[2], CultureInfo.InvariantCulture) : 4.0, autoPlay, shoot, inPoint);
+            return;
+        }
+
+        // 剪辑窗口"设尾帧→停止→再播放"自检：MemoriesStudio.exe --trim-replay-test <视频路径>
+        if (e.Args.Length >= 2 && e.Args[0] == "--trim-replay-test")
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            RunTrimReplayTest(e.Args[1]);
             return;
         }
 
@@ -836,6 +1002,84 @@ public partial class App : Application
     /// 剪辑对话框自检：打开 TrimWindow 播放 seconds 秒，每 300ms 采样一次播放位置。
     /// UI 线程能持续 tick 且位置在推进 = 对话框打开不卡死、libvlc 正在解码。
     /// </summary>
+    /// <summary>验证剪辑窗口在设尾帧、停止后能再次真正起播（libvlc Ended 状态回归）。</summary>
+    private void RunTrimReplayTest(string videoPath)
+    {
+        var logPath = Path.Combine(Path.GetTempPath(), "memories_trimreplay.log");
+        var log = new StringBuilder();
+        Views.TrimWindow? dlg = null;
+        try
+        {
+            var probe = Services.MediaProbe.ProbeAsync(videoPath).GetAwaiter().GetResult();
+            var dur = probe?.Duration ?? 10;
+            var clip = new Models.Clip
+            {
+                SourcePath = videoPath,
+                Kind = Models.MediaKind.Video,
+                SourceDuration = dur,
+                SourceIn = 0,
+                Duration = Math.Min(5, Math.Max(1, dur - 1)),
+                HasAudio = probe?.HasAudio ?? false
+            };
+            dlg = new Views.TrimWindow(clip);
+            dlg.Show();
+
+            var ticker = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var phase = 0;          // 0=等初始化 1=等停止 2=等再播放采样
+            var replaySamples = new List<double>();
+            ticker.Tick += (_, _) =>
+            {
+                if (phase == 0 && dlg.IsInitialized)
+                {
+                    dlg.SetOutPointForTest(Math.Max(1.5, dur - 0.4));  // 尾帧贴近片尾（易触发 Ended）
+                    dlg.StopForTest();
+                    log.AppendLine($"after stop {dlg.DebugState}");
+                    phase = 1;
+                    sw.Restart();
+                }
+                else if (phase == 1 && sw.Elapsed.TotalSeconds >= 0.4)
+                {
+                    dlg.BeginPlay();
+                    log.AppendLine($"after replay {dlg.DebugState}");
+                    phase = 2;
+                    sw.Restart();
+                }
+                else if (phase == 2)
+                {
+                    replaySamples.Add(dlg.CurrentTime);
+                    if (sw.Elapsed.TotalSeconds >= 2.5)
+                    {
+                        ticker.Stop();
+                        var advancing = replaySamples.Count >= 5 &&
+                            replaySamples[^1] - replaySamples[0] > 0.5;
+                        log.AppendLine("samples=" + string.Join(",",
+                            replaySamples.Select(s => s.ToString("0.00", CultureInfo.InvariantCulture))));
+                        log.AppendLine($"RESULT={(advancing ? "OK" : "FAIL")} playing={dlg.IsPlayingForTest} {dlg.DebugState}");
+                        File.WriteAllText(logPath, log.ToString(), Encoding.UTF8);
+                        dlg.Close();
+                        Shutdown(0);
+                    }
+                }
+                if (sw.Elapsed.TotalSeconds > 25)   // 兜底超时，避免自检挂死
+                {
+                    ticker.Stop();
+                    log.AppendLine("RESULT=FAIL timeout");
+                    File.WriteAllText(logPath, log.ToString(), Encoding.UTF8);
+                    dlg.Close();
+                    Shutdown(0);
+                }
+            };
+            ticker.Start();
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine("RESULT=FAIL " + ex.Message);
+            File.WriteAllText(logPath, log.ToString(), Encoding.UTF8);
+            Shutdown(0);
+        }
+    }
+
     private void RunTrimTest(string videoPath, double seconds, bool autoPlay = true, bool shoot = false,
         double inPoint = 0)
     {

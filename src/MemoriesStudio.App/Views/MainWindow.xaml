@@ -61,6 +61,8 @@
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                     <TextBlock x:Name="TxtResBadge" Text="1920×1080 · 30fps" Foreground="{StaticResource TextDimBrush}"
                                VerticalAlignment="Center" Margin="0,0,10,0" FontSize="11.5"/>
+                    <TextBlock x:Name="TxtTotalBadge" Text="" Foreground="{StaticResource TextDimBrush}"
+                               VerticalAlignment="Center" Margin="0,0,10,0" FontSize="11.5"/>
                     <Button x:Name="BtnGlobalSettings" Content="设置" Style="{StaticResource Btn}" Margin="0,0,8,0"
                             Click="OnGlobalSettings" ToolTip="分辨率与帧率"/>
                     <Button x:Name="BtnExport" Content="导出 MP4" Style="{StaticResource AccentBtn}" Padding="18,6"
@@ -98,7 +100,12 @@
                              PreviewMouseLeftButtonDown="OnAssetsListMouseDown" MouseMove="OnAssetsListMouseMove"/>
 
                     <StackPanel Grid.Row="2" Margin="8,8,8,10">
-                        <Button x:Name="BtnImport2" Content="导入图片 / 视频" Style="{StaticResource Btn}" Click="OnImportMedia"/>
+                        <UniformGrid Columns="2">
+                            <Button x:Name="BtnImport2" Content="导入素材" Style="{StaticResource Btn}" Margin="0,0,3,0"
+                                    Click="OnImportMedia" ToolTip="选择图片 / 视频文件加入素材库"/>
+                            <Button x:Name="BtnAddSelectedToTimeline" Content="导入时间轴" Style="{StaticResource Btn}" Margin="3,0,0,0"
+                                    Click="OnAddSelectedToTimeline" ToolTip="将选中的素材加入时间轴（等同双击素材）"/>
+                        </UniformGrid>
                         <TextBlock x:Name="TxtDropHint" Text="也可以把文件或文件夹直接拖进窗口 · Ctrl 多选，Del 删除"
                                    Foreground="{StaticResource TextDimBrush}" FontSize="10.5" Margin="2,6,0,0" TextWrapping="Wrap"/>
                     </StackPanel>
@@ -157,11 +164,15 @@
                             <Grid Margin="0,0,0,6">
                                 <TextBlock Text="片段操作" Style="{StaticResource FieldLabel}"/>
                             </Grid>
-                            <UniformGrid Columns="3" Margin="0,0,0,12">
+                            <UniformGrid Columns="3" Margin="0,0,0,6">
                                 <Button x:Name="BtnClipUp" Content="前移" Style="{StaticResource Btn}" Margin="0,0,4,0" Click="OnClipUp"/>
                                 <Button x:Name="BtnClipDown" Content="后移" Style="{StaticResource Btn}" Margin="2,0,2,0" Click="OnClipDown"/>
                                 <Button x:Name="BtnClipRemove" Content="删除" Style="{StaticResource Btn}" Margin="4,0,0,0" Click="OnRemoveClip"/>
                             </UniformGrid>
+                            <!-- 仅图片片段可见：点一次顺时针旋转 90° -->
+                            <Button x:Name="BtnClipRotate" Content="↻ 旋转 90°" Style="{StaticResource Btn}"
+                                    Click="OnRotateClip" Visibility="Collapsed" Margin="0,0,0,12"
+                                    ToolTip="把这张照片顺时针旋转 90°（每次点击叠加；预览与导出一致）"/>
 
                             <!-- 照片：显示时长可调 -->
                             <StackPanel x:Name="DurPanel">
